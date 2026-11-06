@@ -99,6 +99,15 @@ def aggiungi_materiale(
         float, typer.Option("--sfalsamento", help="Solo running_bond: 0.5 = metà")
     ] = 0.5,
     rotazione: Annotated[int, typer.Option("--rotazione", help="0 | 45 | 90 rispetto ai muri")] = 0,
+    angoli: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--angoli",
+            help="Foto in prospettiva: 4 angoli della faccia della piastrella in pixel, "
+            "ordine alto-sx alto-dx basso-dx basso-sx, es. --angoli '128,63 718,60 800,640 45,640' "
+            "(uno per foto, nello stesso ordine)",
+        ),
+    ] = None,
     catalogo_path: Annotated[Path | None, typer.Option("--catalogo")] = None,
 ) -> None:
     """Aggiunge un articolo al catalogo a partire dalle foto delle piastrelle."""
@@ -113,10 +122,16 @@ def aggiungi_materiale(
     w_cm, h_cm = (float(x) for x in formato.lower().replace(",", ".").split("x"))
     tex_dir = path.parent / "textures"
     tex_dir.mkdir(parents=True, exist_ok=True)
+    if angoli and len(angoli) != len(foto):
+        raise typer.BadParameter("serve un --angoli per ogni foto")
     variants = []
     for k, f in enumerate(foto, 1):
-        dst = tex_dir / f"{codice}-v{k}{f.suffix.lower()}"
-        shutil.copyfile(f, dst)
+        if angoli:
+            dst = tex_dir / f"{codice}-v{k}.png"
+            _rectify(f, angoli[k - 1], w_cm, h_cm, dst)
+        else:
+            dst = tex_dir / f"{codice}-v{k}{f.suffix.lower()}"
+            shutil.copyfile(f, dst)
         variants.append({"texture_file": dst.name, "texture_sha256": sha256_file(dst)})
     square = abs(w_cm - h_cm) < 1e-6
     entry = {
@@ -138,6 +153,39 @@ def aggiungi_materiale(
     path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     Catalog.load(path).load_variants(Catalog.load(path).get(codice))
     typer.secho(f"Aggiunto {codice} ({len(variants)} varianti) a {path}", fg=typer.colors.GREEN)
+
+
+def _rectify(src: Path, corners: str, w_cm: float, h_cm: float, dst: Path) -> None:
+    """Raddrizza la faccia della piastrella fotografata in prospettiva (vista frontale)."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    from app.core import ingest
+
+    pts = np.array(
+        [[float(v) for v in p.split(",")] for p in corners.replace(";", " ").split()],
+        dtype=np.float32,
+    )
+    if pts.shape != (4, 2):
+        raise typer.BadParameter("--angoli: servono 4 punti x,y")
+    img = ingest.load_image(src).pixels[..., :3]
+    scale = min(1024 / w_cm, 1024 / h_cm, 30.0)  # px per cm, lato massimo 1024 px
+    out_w, out_h = round(w_cm * scale), round(h_cm * scale)
+    target = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
+    m = cv2.getPerspectiveTransform(pts, target)
+    flat = cv2.warpPerspective(
+        np.ascontiguousarray(img),
+        m,
+        (out_w, out_h),
+        flags=cv2.INTER_AREA,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    inset = max(1, round(min(out_w, out_h) * 0.01))  # via il filo del bordo/smusso
+    flat = flat[inset:-inset, inset:-inset]
+    Image.fromarray(np.ascontiguousarray(flat)).resize(
+        (out_w, out_h), Image.Resampling.LANCZOS
+    ).save(dst, format="PNG")
 
 
 @app.command()
