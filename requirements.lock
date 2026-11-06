@@ -1,0 +1,16 @@
+annotated-types==0.8.0
+click==8.5.0
+coverage==7.17.2
+hypothesis==6.170.15
+numpy==2.5.3
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pytest==9.2.0
+pytest-cov==7.1.0
+rich==15.0.0
+shellingham==1.5.4
+typer==0.28.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "materials": [
+    {
+      "id": "gres-grigio-30x30",
+      "name": "Gres grigio 30x30",
+      "version": "1",
+      "texture_file": "gres-grigio-30x30.png",
+      "texture_sha256": "7af7c3e5f976ef2c188c77593443b9bca79773cc38a0dabb17fb536c620d0f42",
+      "texture_color_space": "srgb",
+      "tile_w_mm": 300,
+      "tile_h_mm": 300,
+      "joint_default_mm": 3,
+      "joint_range_mm": [
+        2,
+        5
+      ],
+      "joint_color": "#b8b4ac",
+      "allowed_patterns": [
+        "grid",
+        "running_bond_50"
+      ]
+    },
+    {
+      "id": "cotto-20x40",
+      "name": "Cotto 20x40",
+      "version": "1",
+      "texture_file": "cotto-20x40.png",
+      "texture_sha256": "80bd36746165006ccd77d67dae7de6ea15c27a6bfc5adfb2bea0192534d1c0a7",
+      "texture_color_space": "srgb",
+      "tile_w_mm": 200,
+      "tile_h_mm": 400,
+      "joint_default_mm": 3,
+      "joint_range_mm": [
+        2,
+        5
+      ],
+      "joint_color": "#b8b4ac",
+      "allowed_patterns": [
+        "grid",
+        "running_bond_50"
+      ]
+    },
+    {
+      "id": "marmo-bianco-60x60",
+      "name": "Marmo bianco 60x60",
+      "version": "1",
+      "texture_file": "marmo-bianco-60x60.png",
+      "texture_sha256": "52840cc5686dc65482107a05b07a324715fb42eb8f86180990cbe048990a5ffb",
+      "texture_color_space": "srgb",
+      "tile_w_mm": 600,
+      "tile_h_mm": 600,
+      "joint_default_mm": 3,
+      "joint_range_mm": [
+        2,
+        5
+      ],
+      "joint_color": "#b8b4ac",
+      "allowed_patterns": [
+        "grid",
+        "running_bond_50"
+      ]
+    }
+  ]
+}
