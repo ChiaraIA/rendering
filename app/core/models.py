@@ -166,6 +166,36 @@ class LayoutParams(BaseModel):
     seed: int | None = None  # None = derivato da immagine + materiale (deterministico)
 
 
+class FocalCheck(BaseModel):
+    """Coerenza tra angoli cliccati, misure della stanza e focale EXIF."""
+
+    model_config = ConfigDict(frozen=True)
+
+    focal_35mm: float | None
+    f_px_exif: float | None
+    f_px_estimated: float | None
+    axes_angle_deg: float | None = None  # angolo tra i muri implicito (atteso 90)
+    aspect_error: float | None = None  # errore relativo sul rapporto L/W implicito
+    consistent: bool | None = None  # None = non verificabile (manca l'EXIF)
+    message: str = ""
+
+
+class PlaneGeometry(BaseModel):
+    """Stanza rettangolare L x W mm; H mappa il piano (mm) nell'immagine (px)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    corners_px: list[tuple[float, float]] = Field(min_length=4, max_length=4)
+    length_mm: float = Field(gt=0)
+    width_mm: float = Field(gt=0)
+    image_size: tuple[int, int]
+    H: list[list[float]]
+    H_inv: list[list[float]]
+    condition_number: float
+    reprojection_error_px: float
+    focal: FocalCheck
+
+
 class LightingParams(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -177,8 +207,12 @@ class RenderRequest(BaseModel):
 
     layout: LayoutParams
     lighting: LightingParams = LightingParams()
-    render_mode: Literal["flat"] = "flat"  # M2: "tiled"
+    render_mode: Literal["tiled", "flat"] = "tiled"  # "flat" = solo debug
+    supersampling: int = Field(4, ge=1, le=16)
     output_format: Literal["png", "tiff"] = "png"
+
+
+TILE_NONE = np.iinfo(np.int32).min
 
 
 @dataclass(frozen=True, eq=False)
@@ -190,6 +224,7 @@ class MaterialLayer:
     material_id: str
     render_mode: str
     notes: tuple[str, ...] = ()
+    tile_ij: NDArray[np.int32] | None = None  # (h, w, 2) indici piastrella; TILE_NONE = fuga
 
 
 @dataclass(frozen=True, eq=False)
@@ -231,6 +266,16 @@ class OutputFile(BaseModel):
     sha256: str
 
 
+class LayoutStats(BaseModel):
+    """Numeri della posa, utili al cliente e al posatore."""
+
+    seed: int
+    tiles_whole: int
+    tiles_cut: int
+    px_per_mm_min: float
+    px_per_mm_max: float
+
+
 class MaterialInfo(BaseModel):
     id: str
     name: str
@@ -250,6 +295,8 @@ class RenderReport(BaseModel):
     mask: MaskRecord
     request: RenderRequest
     material: MaterialInfo
+    geometry: PlaneGeometry | None = None
+    layout: LayoutStats | None = None
     checks: list[CheckResult]
     warnings: list[str]
     outputs: list[OutputFile]
