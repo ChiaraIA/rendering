@@ -32,6 +32,18 @@ pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
 | Niente scorciatoie | `esegui_posa` e `consegna` rifiutano di procedere se manca un'approvazione o se l'integrità fallisce. Dopo 3 bocciature dello stesso passo la pratica passa a un operatore. |
 | Tracciabilità | La cartella della pratica contiene ogni proposta, overlay, verdetto (con motivo), gli input grezzi degli agenti (`lavoro/tracce.jsonl`) e `report.json`. |
 
+## Provarlo su GitHub Codespaces (niente da installare)
+
+1. Su GitHub: **Code → Codespaces → ⋯ → New with options**, scegli il branch e crea il
+   Codespace. Quando lo chiede, inserisci la tua `ANTHROPIC_API_KEY`: viene salvata come
+   segreto di Codespaces e non finisce nel codice.
+2. Attendi l'installazione automatica (`pip install -e .`), poi nel terminale scrivi:
+   ```bash
+   posa web
+   ```
+3. Si apre la scheda della porta 7860. Se non si apre, vai su **Ports → 7860 → Open in
+   Browser**. Carica la tua foto e premi **"Posa il pavimento"**.
+
 ## Avvio rapido (demo)
 
 Requisiti: Python 3.11+ e una chiave API Anthropic.
