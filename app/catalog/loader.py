@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -13,13 +14,16 @@ from pydantic import BaseModel, ValidationError
 
 from app.core.errors import CatalogError
 from app.core.ingest import readonly, sha256_bytes
-from app.core.models import MaterialSpec
+from app.core.models import MaterialSpec, TextureVariant
 
 DEFAULT_CATALOG = Path(__file__).parent / "data" / "catalog.json"
 
 
+SCHEMA_VERSION = "2.0"
+
+
 class CatalogFile(BaseModel):
-    schema_version: str
+    schema_version: Literal["2.0"]
     materials: list[MaterialSpec]
 
 
@@ -56,14 +60,20 @@ class Catalog:
         except KeyError:
             raise CatalogError(f"materiale {material_id!r} non presente nel catalogo") from None
 
-    def load_texture(self, spec: MaterialSpec) -> NDArray[np.uint8]:
-        """Texture RGB 8 bit sRGB, dopo la verifica dell'hash dichiarato a catalogo."""
-        path = self.root / "textures" / spec.texture_file
+    def load_variants(self, spec: MaterialSpec) -> list[NDArray[np.uint8]]:
+        """Texture RGB 8 bit sRGB di ogni variante, dopo la verifica dell'hash a catalogo."""
+        return [self._load_texture(spec.id, v) for v in spec.variants]
+
+    def _load_texture(self, material_id: str, variant: TextureVariant) -> NDArray[np.uint8]:
+        path = self.root / "textures" / variant.texture_file
         if not path.is_file():
-            raise CatalogError(f"texture mancante per {spec.id}: {path.name}")
+            raise CatalogError(f"texture mancante per {material_id}: {path.name}")
         data = path.read_bytes()
-        if sha256_bytes(data) != spec.texture_sha256:
-            raise CatalogError(f"hash della texture di {spec.id} non corrisponde al catalogo")
+        if sha256_bytes(data) != variant.texture_sha256:
+            raise CatalogError(
+                f"hash della texture {variant.texture_file} di {material_id} "
+                "non corrisponde al catalogo"
+            )
         img = Image.open(io.BytesIO(data))
         img.load()
         img = ImageOps.exif_transpose(img) or img

@@ -135,9 +135,11 @@ def catalog_list(catalog: CatalogOpt = None) -> None:
     except PosaError as exc:
         raise _fail(exc) from exc
     for m in cat.materials:
+        joint = f"fuga {m.joint_mm:g} mm" if m.joint_mm > 0 else "a incastro"
+        posa = m.pattern.type + (f" {m.pattern.rotation_deg}°" if m.pattern.rotation_deg else "")
         typer.echo(
-            f"{m.id:24s} {m.tile_w_mm:g}x{m.tile_h_mm:g} mm"
-            f"  fuga {m.joint_default_mm:g} mm  {m.name}"
+            f"{m.id:26s} {m.tile_w_mm:g}x{m.tile_h_mm:g} mm  {joint:12s} {posa:16s}"
+            f" {len(m.variants)} varianti  {m.name}"
         )
 
 

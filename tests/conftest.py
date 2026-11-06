@@ -17,9 +17,10 @@ from app.pipeline import render as pipeline
 MATERIAL = "gres-grigio-30x30"
 
 
-@pytest.fixture
-def catalog(tmp_path: Path) -> Catalog:
-    return Catalog.load(synthetic.write_catalog(tmp_path / "catalog"))
+@pytest.fixture(scope="session")
+def catalog(tmp_path_factory: pytest.TempPathFactory) -> Catalog:
+    """Catalogo di sola lettura condiviso; i test che lo alterano ne creano uno proprio."""
+    return Catalog.load(synthetic.write_catalog(tmp_path_factory.mktemp("catalog")))
 
 
 @pytest.fixture

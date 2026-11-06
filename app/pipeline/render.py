@@ -90,11 +90,11 @@ def render(
 
     catalog = catalog or Catalog.load()
     spec = catalog.get(request.layout.material_id)
-    texture = catalog.load_texture(spec)
+    variants = catalog.load_variants(spec)
     timings["load"] = (time.perf_counter() - t0) * 1000
 
     t1 = time.perf_counter()
-    layer = material.flat_layer(spec, texture, job.source, record.bbox)
+    layer = material.flat_layer(spec, variants, job.source, record.bbox)
     result = compositor.composite(job.source, mask, record, layer)
     timings["composite"] = (time.perf_counter() - t1) * 1000
 
@@ -127,7 +127,7 @@ def render(
                 "icc": job.source.meta.icc_sha256,
                 "mask": record.mask_sha256,
                 "request": request.model_dump(mode="json"),
-                "texture": spec.texture_sha256,
+                "variants": [v.texture_sha256 for v in spec.variants],
                 "catalog": catalog.sha256,
                 "versions": versions,
             }
@@ -135,7 +135,7 @@ def render(
     )
 
     flat = material.flat_color_linear(
-        material.texture_in_photo_space(texture, job.source)[0], job.source
+        material.variants_in_photo_space(variants, job.source)[0], job.source
     )
     report = RenderReport(
         schema_version=config.REPORT_SCHEMA_VERSION,
@@ -150,7 +150,7 @@ def render(
             id=spec.id,
             name=spec.name,
             version=spec.version,
-            texture_sha256=spec.texture_sha256,
+            variant_sha256=[v.texture_sha256 for v in spec.variants],
             catalog_sha256=catalog.sha256,
             flat_color_linear=(float(flat[0]), float(flat[1]), float(flat[2])),
         ),

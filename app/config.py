@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Ingest
 MAX_PIXELS = 80_000_000
-ALLOWED_INPUT_FORMATS = frozenset({"JPEG", "PNG", "TIFF", "WEBP"})
+ALLOWED_INPUT_FORMATS = frozenset({"JPEG", "MPO", "PNG", "TIFF", "WEBP", "HEIF"})
 
 # Maschera
 CONFIRM_PREFIX_MIN_LEN = 8

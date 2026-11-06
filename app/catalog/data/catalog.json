@@ -1,65 +1,108 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "materials": [
     {
       "id": "gres-grigio-30x30",
       "name": "Gres grigio 30x30",
       "version": "1",
-      "texture_file": "gres-grigio-30x30.png",
-      "texture_sha256": "7af7c3e5f976ef2c188c77593443b9bca79773cc38a0dabb17fb536c620d0f42",
-      "texture_color_space": "srgb",
       "tile_w_mm": 300,
       "tile_h_mm": 300,
-      "joint_default_mm": 3,
-      "joint_range_mm": [
-        2,
-        5
-      ],
+      "joint_mm": 3,
       "joint_color": "#b8b4ac",
-      "allowed_patterns": [
-        "grid",
-        "running_bond_50"
-      ]
+      "pattern": {
+        "type": "grid"
+      },
+      "variants": [
+        {
+          "texture_file": "gres-grigio-30x30-v1.png",
+          "texture_sha256": "b2440a0690467aab36d75ebdcdedb528cfa9a08a5709567b1fecaecf6830ff53"
+        },
+        {
+          "texture_file": "gres-grigio-30x30-v2.png",
+          "texture_sha256": "45b3fa412b697661215fcda8fb486b91e2f16674b4c92ce529e66dd864b3526e"
+        },
+        {
+          "texture_file": "gres-grigio-30x30-v3.png",
+          "texture_sha256": "ec948977d4b64d61c09c705c54506e5fac3114c402ac12db90c4ba0d5fb30ce3"
+        },
+        {
+          "texture_file": "gres-grigio-30x30-v4.png",
+          "texture_sha256": "f5c52def141144798b18f1e99c2fea6e92f676eec89f3ee17054706f66e2d74b"
+        }
+      ],
+      "variant_rotations": [
+        0,
+        90,
+        180,
+        270
+      ],
+      "texture_color_space": "srgb"
     },
     {
-      "id": "cotto-20x40",
-      "name": "Cotto 20x40",
+      "id": "laminato-rovere-120x20",
+      "name": "Laminato rovere a incastro 120x20",
       "version": "1",
-      "texture_file": "cotto-20x40.png",
-      "texture_sha256": "80bd36746165006ccd77d67dae7de6ea15c27a6bfc5adfb2bea0192534d1c0a7",
-      "texture_color_space": "srgb",
-      "tile_w_mm": 200,
-      "tile_h_mm": 400,
-      "joint_default_mm": 3,
-      "joint_range_mm": [
-        2,
-        5
+      "tile_w_mm": 1200,
+      "tile_h_mm": 200,
+      "joint_mm": 0,
+      "joint_color": null,
+      "pattern": {
+        "type": "running_bond",
+        "bond_offset": 0.33
+      },
+      "variants": [
+        {
+          "texture_file": "laminato-rovere-120x20-v1.png",
+          "texture_sha256": "30f91fbbf326f1a24f91792477f3a602169411aba9ed2113d8feaf6bbb6f3158"
+        },
+        {
+          "texture_file": "laminato-rovere-120x20-v2.png",
+          "texture_sha256": "d73a2605bb94d46c0c2f2b320f6ba110e533e257b127b68986d81c30522c1b00"
+        },
+        {
+          "texture_file": "laminato-rovere-120x20-v3.png",
+          "texture_sha256": "b77a5b5dea5e0cf99f72258124e70ea3450cf50145217e46637c2d92f833fcfa"
+        }
       ],
-      "joint_color": "#b8b4ac",
-      "allowed_patterns": [
-        "grid",
-        "running_bond_50"
-      ]
+      "variant_rotations": [
+        0,
+        180
+      ],
+      "texture_color_space": "srgb"
     },
     {
       "id": "marmo-bianco-60x60",
-      "name": "Marmo bianco 60x60",
+      "name": "Marmo bianco 60x60 in diagonale",
       "version": "1",
-      "texture_file": "marmo-bianco-60x60.png",
-      "texture_sha256": "52840cc5686dc65482107a05b07a324715fb42eb8f86180990cbe048990a5ffb",
-      "texture_color_space": "srgb",
       "tile_w_mm": 600,
       "tile_h_mm": 600,
-      "joint_default_mm": 3,
-      "joint_range_mm": [
-        2,
-        5
+      "joint_mm": 2,
+      "joint_color": "#d9d6cf",
+      "pattern": {
+        "type": "grid",
+        "rotation_deg": 45
+      },
+      "variants": [
+        {
+          "texture_file": "marmo-bianco-60x60-v1.png",
+          "texture_sha256": "c79c48f85ec0e1fca78a5df349c8d500df9e8cef36c2711e6ac3689845882305"
+        },
+        {
+          "texture_file": "marmo-bianco-60x60-v2.png",
+          "texture_sha256": "cef22fd1c596ff16b6f064cef15106b2e8526972e0bb4f0997bb5bc24e96de2d"
+        },
+        {
+          "texture_file": "marmo-bianco-60x60-v3.png",
+          "texture_sha256": "2ba5284c4fc162d725df916bf219539a0509c65a119bf2de7467444ea2e8bd36"
+        }
       ],
-      "joint_color": "#b8b4ac",
-      "allowed_patterns": [
-        "grid",
-        "running_bond_50"
-      ]
+      "variant_rotations": [
+        0,
+        90,
+        180,
+        270
+      ],
+      "texture_color_space": "srgb"
     }
   ]
 }

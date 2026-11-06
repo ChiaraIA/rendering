@@ -38,6 +38,7 @@ class ImageMeta(BaseModel):
     height: int
     channels: Literal[3, 4]
     bit_depth: Literal[8, 16]
+    source_bit_depth: int = 8
     source_format: str
     source_mode: str
     exif_orientation: int = Field(ge=1, le=8)
@@ -45,6 +46,10 @@ class ImageMeta(BaseModel):
     icc_description: str | None
     icc_dropped: bool = False
     color_space: ColorSpace
+    color_origin: Literal["icc", "nclx", "none"] = "none"
+    focal_35mm: float | None = None
+    camera: str | None = None
+    extra_images_ignored: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -91,43 +96,74 @@ class MaskRecord(BaseModel):
     confirmed_at: str | None = None
 
 
+class TextureVariant(BaseModel):
+    """Foto di una singola piastrella, frontale e ritagliata, senza fuga."""
+
+    model_config = ConfigDict(frozen=True)
+
+    texture_file: str
+    texture_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _plain_name(self) -> TextureVariant:
+        f = self.texture_file
+        if "/" in f or "\\" in f or ".." in f or not f:
+            raise ValueError("texture_file deve essere un nome di file nella cartella textures/")
+        return self
+
+
+class LayingPattern(BaseModel):
+    """Schema di posa: fissato dal materiale, mai scelto dal cliente."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["grid", "running_bond"] = "grid"
+    bond_offset: float = Field(0.5, gt=0, lt=1)  # frazione di piastrella, solo running_bond
+    rotation_deg: Literal[0, 45, 90] = 0  # rispetto ai muri (lati del rettangolo stanza)
+
+
 class MaterialSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9\-]{1,63}$")
     name: str
     version: str
-    texture_file: str
-    texture_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    texture_color_space: Literal["srgb"] = "srgb"
     tile_w_mm: float = Field(gt=0)
     tile_h_mm: float = Field(gt=0)
-    joint_default_mm: float = Field(ge=0)
-    joint_range_mm: tuple[float, float]
-    joint_color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
-    allowed_patterns: list[Literal["grid", "running_bond_50"]] = ["grid"]
+    joint_mm: float = Field(ge=0, le=30)  # 0 = posa a incastro / senza fuga
+    joint_color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{6}$")
+    pattern: LayingPattern = LayingPattern()
+    variants: list[TextureVariant] = Field(min_length=1)
+    variant_rotations: list[Literal[0, 90, 180, 270]] = [0]
+    texture_color_space: Literal["srgb"] = "srgb"
 
     @model_validator(mode="after")
-    def _joint_in_range(self) -> MaterialSpec:
-        lo, hi = self.joint_range_mm
-        if not (0 <= lo <= self.joint_default_mm <= hi):
-            raise ValueError("joint_default_mm fuori da joint_range_mm")
-        if "/" in self.texture_file or "\\" in self.texture_file or ".." in self.texture_file:
-            raise ValueError("texture_file deve essere un nome di file nella cartella textures/")
+    def _consistent(self) -> MaterialSpec:
+        if self.joint_mm > 0 and self.joint_color is None:
+            raise ValueError("joint_color obbligatorio se joint_mm > 0")
+        rots = self.variant_rotations
+        if not rots or len(set(rots)) != len(rots):
+            raise ValueError("variant_rotations deve contenere valori distinti")
+        if self.tile_w_mm != self.tile_h_mm and any(r in (90, 270) for r in rots):
+            raise ValueError("rotazioni 90/270 ammesse solo per piastrelle quadrate")
+        files = [v.texture_file for v in self.variants]
+        if len(set(files)) != len(files):
+            raise ValueError("varianti duplicate")
         return self
+
+    @property
+    def pitch_mm(self) -> tuple[float, float]:
+        """Passo della griglia: piastrella + fuga."""
+        return (self.tile_w_mm + self.joint_mm, self.tile_h_mm + self.joint_mm)
 
 
 class LayoutParams(BaseModel):
-    """Parametri di posa scelti dall'utente. Misure e texture arrivano solo dal catalogo."""
+    """Il cliente sceglie solo il materiale. Fughe, schema e misure arrivano dal catalogo."""
 
     model_config = ConfigDict(frozen=True)
 
     material_id: str
-    joint_mm: float | None = None
-    rotation_deg: float = 0.0
-    offset_mm: tuple[float, float] = (0.0, 0.0)
-    pattern: Literal["grid", "running_bond_50"] = "grid"
-    seed: int = 0
+    seed: int | None = None  # None = derivato da immagine + materiale (deterministico)
 
 
 class LightingParams(BaseModel):
@@ -199,7 +235,7 @@ class MaterialInfo(BaseModel):
     id: str
     name: str
     version: str
-    texture_sha256: str
+    variant_sha256: list[str]
     catalog_sha256: str
     flat_color_linear: tuple[float, float, float] | None = None
 
