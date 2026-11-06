@@ -117,6 +117,7 @@ def aggiungi_materiale(
     from app.catalog.loader import DEFAULT_CATALOG
     from app.core.ingest import sha256_file
     from app.core.models import MaterialSpec
+    from app.storage.catalog_import import rectify_tile
 
     path = catalogo_path or DEFAULT_CATALOG
     w_cm, h_cm = (float(x) for x in formato.lower().replace(",", ".").split("x"))
@@ -128,7 +129,10 @@ def aggiungi_materiale(
     for k, f in enumerate(foto, 1):
         if angoli:
             dst = tex_dir / f"{codice}-v{k}.png"
-            _rectify(f, angoli[k - 1], w_cm, h_cm, dst)
+            try:
+                rectify_tile(f, angoli[k - 1], w_cm, h_cm, dst)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
         else:
             dst = tex_dir / f"{codice}-v{k}{f.suffix.lower()}"
             shutil.copyfile(f, dst)
@@ -153,39 +157,6 @@ def aggiungi_materiale(
     path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     Catalog.load(path).load_variants(Catalog.load(path).get(codice))
     typer.secho(f"Aggiunto {codice} ({len(variants)} varianti) a {path}", fg=typer.colors.GREEN)
-
-
-def _rectify(src: Path, corners: str, w_cm: float, h_cm: float, dst: Path) -> None:
-    """Raddrizza la faccia della piastrella fotografata in prospettiva (vista frontale)."""
-    import cv2
-    import numpy as np
-    from PIL import Image
-
-    from app.core import ingest
-
-    pts = np.array(
-        [[float(v) for v in p.split(",")] for p in corners.replace(";", " ").split()],
-        dtype=np.float32,
-    )
-    if pts.shape != (4, 2):
-        raise typer.BadParameter("--angoli: servono 4 punti x,y")
-    img = ingest.load_image(src).pixels[..., :3]
-    scale = min(1024 / w_cm, 1024 / h_cm, 30.0)  # px per cm, lato massimo 1024 px
-    out_w, out_h = round(w_cm * scale), round(h_cm * scale)
-    target = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
-    m = cv2.getPerspectiveTransform(pts, target)
-    flat = cv2.warpPerspective(
-        np.ascontiguousarray(img),
-        m,
-        (out_w, out_h),
-        flags=cv2.INTER_AREA,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    inset = max(1, round(min(out_w, out_h) * 0.01))  # via il filo del bordo/smusso
-    flat = flat[inset:-inset, inset:-inset]
-    Image.fromarray(np.ascontiguousarray(flat)).resize(
-        (out_w, out_h), Image.Resampling.LANCZOS
-    ).save(dst, format="PNG")
 
 
 @app.command()
