@@ -16,7 +16,7 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image, ImageCms, ImageDraw
+from PIL import Image, ImageCms, ImageDraw, ImageFilter
 
 from app.core.ingest import sha256_file
 
@@ -213,9 +213,17 @@ def make_tile_texture(
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     tone = rng.uniform(-10, 10)
     if kind == "wood":
-        warp = _clouds(h, w, rng, cells=4) * 6
-        grain = np.sin((yy + warp) / h * np.pi * rng.uniform(5, 9) + rng.uniform(0, 6))
-        lum = tone + 14 * grain + 6 * _clouds(h, w, rng, cells=3)
+        # venature lunghe nel verso della doga (asse x): rumore stirato lungo x
+        def streaks(cols: int, amp: float) -> NDArray[np.float64]:
+            small = rng.uniform(0, 255, size=(h, max(2, cols))).astype(np.uint8)
+            big = Image.fromarray(small).resize((w, h), Image.Resampling.BICUBIC)
+            return (np.asarray(big, dtype=np.float64) / 127.5 - 1.0) * amp
+
+        lum = tone + streaks(w // 90, 10) + streaks(w // 25, 6) + 2 * _clouds(h, w, rng, cells=3)
+        # fiammatura: archi chiusi lungo la doga
+        cx, cy = rng.uniform(0.2, 0.8) * w, rng.uniform(-0.5, 1.5) * h
+        arc = np.sin(np.hypot((xx - cx) / (w * 0.9), (yy - cy) / (h * 0.25)) * 40)
+        lum += 5 * arc * np.exp(-(((xx - cx) / (w * 0.35)) ** 2))
     elif kind == "marble":
         turb = _clouds(h, w, rng, cells=5) * 3.0 + _clouds(h, w, rng, cells=9) * 1.2
         veins = np.abs(np.sin((xx + yy) / w * np.pi * 2.0 + turb))
@@ -223,7 +231,10 @@ def make_tile_texture(
     else:
         lum = tone + 9 * _clouds(h, w, rng, cells=5)
     tex = np.asarray(base, dtype=np.float64) + lum[..., None]
-    tex += rng.normal(0, 7, size=(h, w, 1))
+    tex += rng.normal(0, 4 if kind == "wood" else 7, size=(h, w, 1))
+    if kind == "wood":  # smusso dei bordi: le giunzioni delle doghe a incastro si leggono
+        edge = np.minimum.reduce([xx, w - 1 - xx, yy, h - 1 - yy])
+        tex *= (1 - 0.35 * np.exp(-edge / 1.2))[..., None]
     out = np.clip(np.rint(tex), 0, 255).astype(np.uint8)
     if marker:
         m = max(2, min(w, h) // 10)
@@ -332,3 +343,140 @@ def write_catalog(
 
 if __name__ == "__main__":  # rigenera il catalogo di esempio distribuito col pacchetto
     print(write_catalog(Path(__file__).resolve().parents[1] / "catalog" / "data"))
+
+
+# ------------------------------------------------------------------ stanza sintetica
+
+
+@dataclass(frozen=True, eq=False)
+class RoomScene:
+    """Foto sintetica di una stanza con verità geometrica nota."""
+
+    photo: NDArray[np.uint8]
+    floor_mask: NDArray[np.uint8]  # pavimento visibile (escluso il divano)
+    corners_px: NDArray[np.float64]  # angoli della stanza proiettati (possono uscire dall'immagine)
+    H: NDArray[np.float64]  # piano pavimento (mm) -> immagine (px)
+    K: NDArray[np.float64]
+    room_mm: tuple[float, float]
+    focal_35mm: float
+
+
+def _look(pitch_deg: float, yaw_deg: float) -> NDArray[np.float64]:
+    p, y = np.radians(pitch_deg), np.radians(yaw_deg)
+    fwd = np.array([np.sin(y) * np.cos(p), np.cos(y) * np.cos(p), -np.sin(p)])
+    right = np.array([np.cos(y), -np.sin(y), 0.0])
+    down = np.cross(fwd, right)
+    return np.stack([right, down, fwd])  # righe: assi camera in coordinate mondo
+
+
+def make_room_scene(
+    width: int = 1600,
+    height: int = 1200,
+    room_mm: tuple[float, float] = (4200.0, 3600.0),
+    focal_35mm: float = 26.0,
+    cam: tuple[float, float, float] = (2300.0, 250.0, 1550.0),
+    pitch_deg: float = 27.0,
+    yaw_deg: float = -4.0,
+    seed: int = 0,
+) -> RoomScene:
+    """Stanza L x W (mm) vista da vicino al muro d'ingresso: gli angoli vicini sono fuori campo.
+
+    Mondo: pavimento z=0, stanza [0,L]x[0,W], soffitto a 2700 mm. Divano appoggiato al
+    muro di fondo, finestra sul muro sinistro, vecchio pavimento a quadri 400 mm con fughe.
+    """
+    L, W = room_mm
+    ceil_h = 2700.0
+    f = focal_35mm * np.hypot(width, height) / np.hypot(36, 24)
+    K = np.array([[f, 0, width / 2], [0, f, height / 2], [0, 0, 1.0]])
+    R = _look(pitch_deg, yaw_deg)
+    C = np.asarray(cam)
+    H = K @ np.stack([R[:, 0], R[:, 1], -R @ C], axis=1)
+    H = H / H[2, 2]
+
+    ys, xs = np.mgrid[0:height, 0:width].astype(np.float64)
+    rays_cam = np.stack([(xs + 0.5 - K[0, 2]) / f, (ys + 0.5 - K[1, 2]) / f, np.ones_like(xs)], -1)
+    d = rays_cam @ R  # direzione nel mondo (R ortonormale)
+    t_best = np.full(xs.shape, np.inf)
+    kind = np.zeros(xs.shape, np.int8)  # 1 pav, 2 muro sx, 3 muro dx, 4 fondo, 5 soffitto, 6 divano
+    hit = np.zeros(xs.shape + (3,))
+
+    def plane(axis: int, value: float, k: int) -> None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (value - C[axis]) / d[..., axis]
+        p = C + t[..., None] * d
+        ok = (t > 1e-6) & (t < t_best)
+        ok &= (p[..., 0] >= -1) & (p[..., 0] <= L + 1) & (p[..., 1] >= -1) & (p[..., 1] <= W + 1)
+        ok &= (p[..., 2] >= -1) & (p[..., 2] <= ceil_h + 1)
+        t_best[ok] = t[ok]
+        kind[ok] = k
+        hit[ok] = p[ok]
+
+    plane(2, 0.0, 1)
+    plane(0, 0.0, 2)
+    plane(0, L, 3)
+    plane(1, W, 4)
+    plane(2, ceil_h, 5)
+
+    # divano: scatola [u0,u1] x [v0,v1] x [0,h]
+    box_lo = np.array([1350.0, W - 900.0, 0.0])
+    box_hi = np.array([3050.0, W - 60.0, 760.0])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t1 = (box_lo - C) / d
+        t2 = (box_hi - C) / d
+    tmin = np.nanmax(np.minimum(t1, t2), axis=-1)
+    tmax = np.nanmin(np.maximum(t1, t2), axis=-1)
+    sofa = (tmax >= tmin) & (tmin > 0) & (tmin < t_best)
+    t_best[sofa] = tmin[sofa]
+    kind[sofa] = 6
+    hit[sofa] = C + tmin[sofa][..., None] * d[sofa]
+
+    rng = np.random.default_rng(seed)
+    img = np.zeros((height, width, 3))
+    # luce: finestra sul muro sinistro + decadimento con la distanza
+    win = np.array([0.0, W * 0.55, 1500.0])
+    dist = np.linalg.norm(hit - win, axis=-1)
+    light = 0.55 + 0.75 * np.exp(-((dist / 2600.0) ** 2))
+
+    fl = kind == 1
+    u, v = hit[..., 0], hit[..., 1]
+    cell = 400.0
+    cu, cv_ = np.floor(u / cell), np.floor(v / cell)
+    checker = (cu + cv_) % 2 == 0
+    grout = (np.mod(u, cell) < 4) | (np.mod(v, cell) < 4)
+    floor_col = np.where(checker[..., None], [196, 170, 132], [150, 112, 80]).astype(np.float64)
+    floor_col[grout] = [228, 222, 210]
+    # ombra di contatto del divano sul pavimento
+    near_sofa = np.clip(
+        1
+        - np.hypot(
+            np.maximum(box_lo[0] - u, 0) + np.maximum(u - box_hi[0], 0),
+            np.maximum(box_lo[1] - v, 0) + np.maximum(v - box_hi[1], 0),
+        )
+        / 450.0,
+        0,
+        1,
+    )
+    shade = light * (1 - 0.45 * near_sofa)
+    img[fl] = floor_col[fl] * shade[fl, None] / 1.1
+    wall = (kind >= 2) & (kind <= 4)
+    img[wall] = (
+        np.array([236, 230, 220])
+        * (0.75 + 0.25 * light[wall, None])
+        * np.where(kind[wall] == 4, 0.92, 1.0)[:, None]
+    )
+    win_px = (kind == 2) & (np.abs(v - win[1]) < 600) & (np.abs(hit[..., 2] - 1500) < 650)
+    img[win_px] = [250, 252, 255]
+    img[kind == 5] = [246, 244, 240]
+    sf = kind == 6
+    top = sf & (hit[..., 2] > box_hi[2] - 2)
+    img[sf] = np.array([70, 92, 120]) * light[sf, None]
+    img[top] = np.array([92, 116, 146]) * light[top, None]
+
+    img += rng.normal(0, 3.0, img.shape)
+    photo = np.clip(np.rint(img), 0, 255).astype(np.uint8)
+    photo = np.asarray(Image.fromarray(photo).filter(ImageFilter.GaussianBlur(0.6)), dtype=np.uint8)
+    in_room = (u >= 0) & (u <= L) & (v >= 0) & (v <= W)
+    mask = (fl & in_room).astype(np.uint8) * 255
+    corners = np.array([[0, 0], [L, 0], [L, W], [0, W]], dtype=np.float64)
+    pc = np.c_[corners, np.ones(4)] @ H.T
+    return RoomScene(photo, mask, pc[:, :2] / pc[:, 2:3], H, K, (L, W), focal_35mm)

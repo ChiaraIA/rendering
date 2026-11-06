@@ -18,8 +18,8 @@ from numpy.typing import NDArray
 from app.core.colorspace import from_linear, to_linear, trc_for
 from app.core.errors import IntegrityError
 from app.core.ingest import sha256_array
+from app.core.masking import bbox_of, require_approved
 from app.core.models import BBox, LightMap, MaskRecord, MaterialLayer, SourceImage
-from app.core.segmentation import bbox_of, require_confirmed
 
 _SEAL = object()
 
@@ -60,7 +60,7 @@ def composite(
     layer: MaterialLayer,
     light: LightMap | None = None,
 ) -> CompositeResult:
-    require_confirmed(mask_record, mask, source.meta.normalized_sha256)
+    require_approved(mask_record, mask, source.meta.normalized_sha256)
     original = source.pixels
     if mask.shape != original.shape[:2]:
         raise IntegrityError(f"maschera {mask.shape} e immagine {original.shape[:2]} diverse")

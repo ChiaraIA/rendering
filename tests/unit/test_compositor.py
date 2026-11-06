@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.core import compositor, ingest, segmentation
+from app.core import compositor, ingest, masking
 from app.core.colorspace import from_linear
 from app.core.errors import IntegrityError, MaskNotConfirmedError
 from app.core.models import LightMap, MaterialLayer
@@ -91,7 +91,7 @@ def test_light_map_multiplies_material() -> None:
 def test_requires_confirmed_mask() -> None:
     src = ingest.from_array(synthetic.make_photo(8, 8))
     mask = synthetic.make_mask(8, 8, "full")
-    rec = segmentation.make_record(mask, src.meta.normalized_sha256)
+    rec = masking.make_record(mask, src.meta.normalized_sha256)
     with pytest.raises(MaskNotConfirmedError):
         compositor.composite(src, mask, rec, _layer((0, 0, 0), 8, 8))
 

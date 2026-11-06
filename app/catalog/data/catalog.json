@@ -53,15 +53,15 @@
       "variants": [
         {
           "texture_file": "laminato-rovere-120x20-v1.png",
-          "texture_sha256": "30f91fbbf326f1a24f91792477f3a602169411aba9ed2113d8feaf6bbb6f3158"
+          "texture_sha256": "b090272bc2e9411be7ca6b59a0707fe459affc0c8d45b67a05c4059e93fd2178"
         },
         {
           "texture_file": "laminato-rovere-120x20-v2.png",
-          "texture_sha256": "d73a2605bb94d46c0c2f2b320f6ba110e533e257b127b68986d81c30522c1b00"
+          "texture_sha256": "d56af13a830dc8bc5a6c921a4d4cfa971498a11b6c6153d62d432a42b6ee63e3"
         },
         {
           "texture_file": "laminato-rovere-120x20-v3.png",
-          "texture_sha256": "b77a5b5dea5e0cf99f72258124e70ea3450cf50145217e46637c2d92f833fcfa"
+          "texture_sha256": "0e4be93d8c7511523c000e441b3a456a81dbbd1c83d6f4f71262c47c2746cc5c"
         }
       ],
       "variant_rotations": [

@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from app.catalog.loader import Catalog
 from app.core import icc, ingest
-from app.core.models import ColorSpace, RenderRequest
+from app.core.models import ColorSpace
 from app.devtools import synthetic
-from app.pipeline import render as pipeline
 
 
 def _asym(h: int = 12, w: int = 20) -> np.ndarray:
@@ -86,28 +83,3 @@ def test_mpo_uses_primary_frame(tmp_path: Path) -> None:
     first = np.asarray(Image.open(p).convert("RGB"))
     assert np.array_equal(src.pixels, first)
     assert any("gain map" in w for w in ingest.colorspace_warnings(src.meta))
-
-
-@pytest.mark.parametrize("kind", ["p3_png", "heic"])
-def test_smartphone_photo_end_to_end(
-    tmp_path: Path, catalog: Catalog, request_flat: RenderRequest, kind: str
-) -> None:
-    photo = synthetic.make_photo(96, 64, seed=4)
-    if kind == "heic":
-        path = synthetic.save_heic(photo, tmp_path / "IMG.HEIC", primaries=12, focal_35mm=26)
-    else:
-        path = synthetic.save_image(photo, tmp_path / "p3.png", icc=icc.display_p3())
-    mask = synthetic.save_image(synthetic.make_mask(64, 96, "holes"), tmp_path / "m.png")
-    job = tmp_path / "job"
-    pipeline.ingest_job(path, job)
-    rec = pipeline.import_mask(job, mask)
-    pipeline.confirm_mask(job, rec.mask_sha256[:12])
-    out = pipeline.render(job, request_flat, catalog)
-    assert out.valid
-
-    final = Image.open(out.render_dir / "final.png")
-    alpha = np.asarray(Image.open(out.render_dir / "mask.png"))
-    assert final.info.get("icc_profile") == icc.display_p3()
-    assert np.array_equal(np.asarray(final)[alpha == 0], photo[alpha == 0])
-    report = json.loads((out.render_dir / "report.json").read_text())
-    assert report["input"]["color_space"] == "display_p3"

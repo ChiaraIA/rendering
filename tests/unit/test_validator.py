@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.core import compositor, ingest, segmentation, validator
+from app.core import compositor, ingest, masking, validator
 from app.core.models import MaterialLayer, ValidationReport
 from app.devtools import synthetic
 from tests.conftest import confirmed, forge
@@ -85,11 +85,11 @@ def test_hash_tampering_is_caught() -> None:
 
 def test_unconfirmed_or_changed_mask_is_caught() -> None:
     src, mask, rec, res = _setup()
-    proposed = segmentation.make_record(mask, src.meta.normalized_sha256)
-    assert "mask_confirmed" in _failed(validator.validate(src, res, mask, proposed))
+    proposed = masking.make_record(mask, src.meta.normalized_sha256)
+    assert "mask_approved" in _failed(validator.validate(src, res, mask, proposed))
     other = mask.copy()
     other[0, 0] = 255
-    assert "mask_confirmed" in _failed(validator.validate(src, res, other, rec))
+    assert "mask_approved" in _failed(validator.validate(src, res, other, rec))
 
 
 def test_modified_source_copy_is_caught(tmp_path: Path) -> None:

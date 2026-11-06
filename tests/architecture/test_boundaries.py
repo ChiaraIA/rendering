@@ -1,4 +1,10 @@
-"""Confini architetturali verificati staticamente (regole 4, 5 e core senza AI)."""
+"""Confini architetturali verificati staticamente.
+
+- solo il compositor crea l'immagine finale;
+- solo storage/devtools scrivono immagini, e il master solo l'exporter;
+- solo gli strumenti (dopo il verdetto di un controllore) possono approvare una maschera;
+- il core non dipende da agenti, web o AI.
+"""
 
 from __future__ import annotations
 
@@ -27,16 +33,17 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def test_only_compositor_builds_composite_result() -> None:
-    offenders = [
-        _rel(p)
+def _calls(name: str, allowed: tuple[str, ...]) -> list[str]:
+    return [
+        f"{_rel(p)}:{n.lineno}"
         for p, tree in _modules()
         for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and _call_name(n) == "CompositeResult"
-        and _rel(p) != "core/compositor.py"
+        if isinstance(n, ast.Call) and _call_name(n) == name and not _rel(p).startswith(allowed)
     ]
-    assert offenders == []
+
+
+def test_only_compositor_builds_composite_result() -> None:
+    assert _calls("CompositeResult", ("core/compositor.py",)) == []
 
 
 def test_seal_is_private_to_compositor() -> None:
@@ -53,18 +60,12 @@ def test_seal_is_private_to_compositor() -> None:
 
 def test_image_writes_only_in_storage_and_devtools() -> None:
     allowed = ("storage/", "devtools/")
-    offenders = [
-        f"{_rel(p)}:{n.lineno}"
-        for p, tree in _modules()
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and _call_name(n) in {"save", "imwrite"}
-        and not _rel(p).startswith(allowed)
-    ]
-    assert offenders == []
+    assert _calls("save", allowed) == []
+    assert _calls("imwrite", allowed) == []
 
 
-def test_final_master_written_only_by_exporter() -> None:
+def test_master_written_only_by_exporter() -> None:
+    assert _calls("export_master", ("storage/exporter.py", "agents/tools.py")) == []
     offenders = [
         f"{_rel(p)}:{n.lineno}"
         for p, tree in _modules()
@@ -75,6 +76,11 @@ def test_final_master_written_only_by_exporter() -> None:
         and _rel(p) != "storage/exporter.py"
     ]
     assert offenders == []
+
+
+def test_only_tools_approve_masks() -> None:
+    """Le approvazioni nascono solo dentro gli strumenti, dopo un verdetto del controllore."""
+    assert _calls("approve", ("core/masking.py", "agents/tools.py")) == []
 
 
 def _imports(tree: ast.Module) -> set[str]:
@@ -88,16 +94,16 @@ def _imports(tree: ast.Module) -> set[str]:
     return out
 
 
-def test_adapters_cannot_reach_compositor_or_exporter() -> None:
-    forbidden = ("app.core.compositor", "app.storage")
-    for p, tree in _modules():
-        if _rel(p).startswith("adapters/"):
-            bad = [i for i in _imports(tree) if i.startswith(forbidden)]
-            assert bad == [], f"{_rel(p)} importa {bad}"
-
-
 def test_core_does_not_depend_on_outer_layers() -> None:
-    forbidden = ("app.adapters", "app.api", "app.pipeline", "app.storage", "app.cli")
+    forbidden = (
+        "app.agents",
+        "app.storage",
+        "app.cli",
+        "app.web",
+        "app.catalog",
+        "claude_agent_sdk",
+        "gradio",
+    )
     for p, tree in _modules():
         if _rel(p).startswith("core/"):
             bad = [i for i in _imports(tree) if i.startswith(forbidden)]
@@ -106,8 +112,8 @@ def test_core_does_not_depend_on_outer_layers() -> None:
 
 def test_core_import_pulls_no_ai_or_web_deps() -> None:
     code = (
-        "import sys, app.core.compositor, app.core.validator, app.pipeline.render, app.cli;"
-        "heavy=('torch','google.genai','fastapi','segment_anything');"
+        "import sys, app.core.compositor, app.core.validator, app.core.material, app.core.lighting;"
+        "heavy=('torch','claude_agent_sdk','gradio','fastapi');"
         "bad=[m for m in heavy if m in sys.modules];"
         "print(bad); sys.exit(1 if bad else 0)"
     )

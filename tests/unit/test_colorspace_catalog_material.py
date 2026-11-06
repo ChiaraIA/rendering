@@ -9,10 +9,9 @@ from PIL import ImageCms
 
 from app.catalog.loader import Catalog
 from app.core import colorspace, icc, ingest, material
-from app.core.errors import CatalogError, JobStateError
+from app.core.errors import CatalogError
 from app.core.models import ColorSpace
 from app.devtools import synthetic
-from app.pipeline.job import JobDocument, JobState
 
 
 @pytest.mark.parametrize("trc", ["srgb", "adobe"])
@@ -158,22 +157,3 @@ def test_generated_icc_profiles_are_valid(factory, cs) -> None:  # type: ignore[
     desc, xcs = colorspace.describe_icc(data)
     assert desc and xcs and xcs.strip() == "RGB"
     assert colorspace.classify_icc(data)[0] is cs
-
-
-def test_job_state_machine() -> None:
-    meta = ingest.from_array(synthetic.make_photo(2, 2)).meta
-    doc = JobDocument(
-        schema_version="1",
-        job_id="j",
-        created_at="t",
-        state=JobState.INGESTED,
-        source_file="s",
-        original_path="o",
-        image=meta,
-    )
-    assert not doc.renderable
-    with pytest.raises(JobStateError):
-        doc.advance(JobState.EXPORTED)
-    doc = doc.advance(JobState.MASK_PROPOSED).advance(JobState.MASK_CONFIRMED)
-    assert doc.renderable
-    assert doc.advance(JobState.REJECTED).advance(JobState.EXPORTED).renderable

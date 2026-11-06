@@ -233,3 +233,18 @@ def jacobian_det_image_to_plane(
 ) -> NDArray[np.float64]:
     a, b, c, d = jacobian_image_to_plane(h_inv, xs, ys)
     return np.asarray(a * d - b * c)
+
+
+def px_per_mm_map(
+    geom: PlaneGeometry, bbox: tuple[int, int, int, int], step: int = 8
+) -> NDArray[np.float32]:
+    """Densità locale px/mm su tutta la bbox (calcolata a passo `step` e interpolata)."""
+    import cv2
+
+    x0, y0, x1, y1 = bbox
+    xs = np.arange(x0, x1, step, dtype=np.float64) + 0.5
+    ys = np.arange(y0, y1, step, dtype=np.float64) + 0.5
+    gx, gy = np.meshgrid(xs, ys)
+    det = np.abs(jacobian_det_image_to_plane(np.asarray(geom.H_inv), gx.ravel(), gy.ravel()))
+    ppm = (1.0 / np.sqrt(np.maximum(det, 1e-12))).reshape(gx.shape).astype(np.float32)
+    return np.asarray(cv2.resize(ppm, (x1 - x0, y1 - y0), interpolation=cv2.INTER_LINEAR))

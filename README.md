@@ -1,87 +1,135 @@
-# posa
+# posa — il pavimento nuovo, nella foto della stanza del cliente
 
-Posa un materiale da catalogo su una superficie di una foto, **senza modificare nessun pixel fuori dalla maschera**.
+**posa** è un sistema **multiagente**: il cliente carica la foto della sua stanza, sceglie un
+rivestimento dal catalogo (o fotografa un campione) e riceve la stessa foto con il nuovo
+pavimento posato in prospettiva. **La foto originale non viene mai toccata fuori dal
+pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
 
-Input: una foto, una maschera confermata della superficie e un materiale a catalogo.
-Output: la foto con il materiale applicato (master PNG/TIFF con il profilo ICC originale), la maschera usata, un'anteprima e un `report.json` con parametri ed esito dei controlli.
+```
+                         ┌──────────────── ORCHESTRATORE (Claude) ────────────────┐
+ foto + richiesta ──►    │ pianifica · delega · ripete con il feedback · escalation│
+                         └───┬───────────────┬───────────────┬──────────────┬─────┘
+                             ▼               ▼               ▼              ▼
+                        «pavimento»      «geometra»      «materiali»    esegui_posa
+                        maschera del     4 angoli della  codice o       render deterministico
+                        pavimento        stanza + misure campione       con la texture vera
+                             │               │               │              │
+                             ▼               ▼               ▼              ▼
+                     controllo-maschera controllo-geometria controllo-  controllo-integrità (codice)
+                     (Claude, sessione  (Claude + verifica  materiale   + revisore-finale (Claude)
+                      separata)          focale EXIF)                       │
+                                                                            ▼
+                                     CANCELLI NEL CODICE ───────────► consegna
+```
 
-> Stato: **M1**. Struttura, contratti dati, CLI, compositor e test di integrità.
-> In M1 il materiale viene reso come **riempimento piatto** con il colore medio della texture.
-> Tiling, prospettiva e scala reale arrivano in M2, la luce in M3.
+## Perché ci si può fidare del risultato
 
-## Garanzie
-
-| Regola | Come è garantita |
+| Garanzia | Come è ottenuta |
 |---|---|
-| Originale in sola lettura, identificato da SHA-256 | si legge solo in `rb`; copia nel job con permessi `0444`; array con `writeable=False`; ri-hash a fine render |
-| Stessa risoluzione | controllo bloccante `resolution_match` + `pixel_format_match` |
-| Master PNG/TIFF con ICC preservato | il master viene riletto dopo la scrittura: pixel e byte ICC devono coincidere |
-| Solo `compositor.py` crea l'immagine finale | `CompositeResult` è sigillato; test AST sui confini |
-| Nessun output generativo come risultato finale | gli adapter restituiscono solo `MaskProposal` o `LightHint` |
-| Texture e misure solo dal catalogo | `RenderRequest` contiene un `material_id`; l'hash della texture viene verificato |
-| Render solo dopo la conferma della maschera | conferma legata a sha della maschera + sha dell'immagine |
-| `np.array_equal(final[alpha == 0], original[alpha == 0])` | eseguito dopo ogni render (e garantito per costruzione: `final = original.copy()`) |
-| Un controllo bloccante fallito → niente master | viene scritto solo `report.json` (`--keep-invalid` salva in `quarantine/`) |
+| L'originale non cambia | Viene letto in sola lettura, copiato a `0444` e identificato con SHA-256. L'immagine finale nasce come copia esatta e viene modificata **solo dentro la maschera**. Dopo il render il codice verifica `np.array_equal(final[alpha == 0], original[alpha == 0])`; se fallisce, non c'è consegna. |
+| Il rivestimento è quello giusto | Texture, formato, fughe e schema di posa arrivano **solo dal catalogo**, con l'hash di ogni foto verificato. Nessun agente "disegna" il pavimento. |
+| Nessun agente si approva da solo | I controllori sono sessioni Claude **separate, avviate dal codice** dentro gli strumenti: vedono solo le immagini da giudicare e possono rispondere solo con un verdetto. Le approvazioni le scrive il codice. |
+| Niente scorciatoie | `esegui_posa` e `consegna` rifiutano di procedere se manca un'approvazione o se l'integrità fallisce. Dopo 3 bocciature dello stesso passo la pratica passa a un operatore. |
+| Tracciabilità | La cartella della pratica contiene ogni proposta, overlay, verdetto (con motivo), gli input grezzi degli agenti (`lavoro/tracce.jsonl`) e `report.json`. |
 
-## Installazione e test
+## Avvio rapido (demo)
 
+Requisiti: Python 3.11+ e una chiave API Anthropic.
+
+```bash
+git clone https://github.com/ChiaraIA/rendering.git && cd rendering
+```
 ```bash
 python -m venv .venv && source .venv/bin/activate
 ```
 ```bash
-pip install -e ".[dev]"
+pip install -e .
 ```
 ```bash
-pytest -q --cov=app --cov-report=term-missing
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 ```bash
-ruff check . && mypy app
+posa web
 ```
 
-## Uso
+Apri <http://localhost:7860>, premi **"Usa una stanza di esempio"** (oppure carica la foto di
+una stanza vera), scegli il rivestimento e premi **"Posa il pavimento"**. A destra vedi in
+diretta cosa fanno gli agenti, il prima/dopo con il cursore e i file da scaricare.
+
+Per mandare un link temporaneo al cliente:
 
 ```bash
-posa demo --out runs/demo
-```
-```bash
-posa ingest foto.jpg --job runs/cucina
-```
-```bash
-posa mask import runs/cucina maschera.png
-```
-```bash
-posa mask confirm runs/cucina --sha <primi 12 caratteri dello sha>
-```
-```bash
-posa render runs/cucina --material gres-grigio-30x30
-```
-```bash
-posa catalog list
+posa web --share
 ```
 
-La maschera è un PNG in scala di grigi a 8 bit, della stessa risoluzione della foto **già orientata** (dopo l'EXIF): `0` = fuori, `255` = dentro, valori intermedi = bordo morbido.
+### Da terminale
 
-Exit code: `0` ok · `2` input non valido · `3` maschera assente o non confermata · `4` geometria (M2) · `5` risultato non valido.
+```bash
+posa run foto_stanza.jpg --materiale gres-grigio-30x30 --stanza 4.2x3.6
+```
+```bash
+posa run foto_stanza.heic --campione piastrella_negozio.jpg
+```
+```bash
+posa demo
+```
+```bash
+posa catalogo
+```
+
+La pratica finisce in `pratiche/<data-ora>/`, e il risultato in `consegna/`:
+`final.png` (piena risoluzione, profilo colore originale), `mask.png`, `preview.jpg`,
+`prima_dopo.jpg` e `report.json`.
+
+## Mettere i vostri rivestimenti nel catalogo
+
+Per ogni articolo servono le foto di **una singola piastrella o doga**: frontale, ritagliata
+sul bordo, senza fuga. Più foto diventano **varianti**, che vengono alternate nella posa.
+
+```bash
+posa aggiungi-materiale foto1.jpg foto2.jpg foto3.jpg --codice gres-antracite-60x60 --nome "Gres antracite 60x60" --formato 60x60 --fuga 2 --colore-fuga "#3a3a3c"
+```
+```bash
+posa aggiungi-materiale doga1.jpg doga2.jpg --codice rovere-naturale-120x20 --nome "Rovere naturale" --formato 120x20 --posa running_bond --sfalsamento 0.33
+```
+
+Fughe, schema (`grid` o `running_bond`) e rotazione (`--rotazione 45` per la diagonale) sono
+**fissati dal materiale**: il cliente sceglie solo l'articolo. I materiali di esempio nella
+repo sono texture sintetiche, generate via codice.
+
+## Cosa aspettarsi
+
+- **Tempo:** 2-5 minuti a pratica. **Costo:** circa 0,5-1,5 USD di API, con tutti gli agenti su `claude-opus-5-5`. Si può cambiare modello con `POSA_MODEL`.
+- **Foto supportate:** JPEG, HEIC (iPhone, anche Display P3), PNG, TIFF e WebP a 8 bit. L'orientamento EXIF viene applicato.
+- **Limiti della prima versione:** una sola superficie piana (il pavimento); niente riflessi o superfici curve. Se il cliente non indica le misure della stanza, le stimano gli agenti e il report lo segnala.
 
 ## Struttura
 
 ```
 app/
-  cli.py  config.py
-  core/        models, errors, colorspace, ingest, segmentation, material, compositor, validator
-  catalog/     loader + data/ (catalogo di esempio, rigenerabile con `python -m app.devtools.synthetic`)
-  storage/     jobstore (layout dei job), exporter (unico punto di scrittura del master)
-  pipeline/    job (macchina a stati), render (orchestrazione)
-  adapters/    contratti per SAM / depth / Nano Banana (M4, M6)
-  devtools/    generatori di dati sintetici per test e demo
-tests/         unit, integration, architecture
+  agents/      orchestrator.py (Agent SDK), tools.py (strumenti + cancelli), checkers.py
+               (controllori indipendenti), state.py (stato e cancelli), prompts.py
+  core/        ingest, colorspace/icc, masking, geometry, material (posa in prospettiva),
+               lighting, compositor (unico creatore del risultato), validator, overlays
+  catalog/     catalogo (schema 2.0, varianti con hash)
+  storage/     cartella della pratica, exporter (unico che scrive il master)
+  devtools/    stanze e texture sintetiche per test e demo
+  cli.py  web.py
+tests/         unit, agents (strumenti e cancelli con controllori finti), architecture
 ```
 
-Layout di un job:
+## Sviluppo
 
+```bash
+pip install -e ".[dev]"
 ```
-runs/<job>/source/<file originale> (0444)   normalized.png   source.icc   job.json
-           masks/<sha>.png|.json
-           renders/render-NNN/final.png  mask.png  preview.jpg  report.json
-           quarantine/render-NNN.INVALID.png   (solo con --keep-invalid)
+```bash
+pytest -q
 ```
+```bash
+ruff check . && mypy app
+```
+
+I test non chiamano i modelli: gli strumenti e i cancelli vengono verificati con controllori
+finti, comprese bocciature, limite di tentativi, escalation e integrità violata (1 bit
+alterato fuori dal pavimento → nessuna consegna).

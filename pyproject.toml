@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "posa"
 version = "0.1.0"
-description = "Posa un materiale da catalogo su una superficie di una foto, senza toccare un pixel fuori maschera."
+description = "Sistema multiagente che posa il pavimento scelto dal cliente nella foto della sua stanza, senza toccare un pixel fuori dal pavimento."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,12 +15,12 @@ dependencies = [
     "typer>=0.12",
     "opencv-python-headless>=4.10",
     "pillow-heif>=0.18",
+    "claude-agent-sdk>=0.2",
+    "gradio>=5.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100", "ruff>=0.6", "mypy>=1.11"]
-api = ["fastapi>=0.115", "uvicorn>=0.30"]   # M5
-hdr = ["tifffile>=2024.8"]                   # M3 (16 bit)
 
 [project.scripts]
 posa = "app.cli:main"
@@ -33,6 +33,7 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["live: chiama i modelli veri (serve una chiave API, a pagamento)"]
 addopts = "-ra"
 pythonpath = ["."]
 

@@ -82,11 +82,11 @@ def validate(
 
     # 4. Maschera confermata, invariata e legata a questa immagine.
     mask_ok = (
-        mask_record.status is MaskStatus.CONFIRMED
+        mask_record.status is MaskStatus.APPROVED
         and sha256_array(mask) == mask_record.mask_sha256
         and mask_record.image_sha256 == source.meta.normalized_sha256
     )
-    checks.append(CheckResult(name="mask_confirmed", blocking=True, passed=mask_ok))
+    checks.append(CheckResult(name="mask_approved", blocking=True, passed=mask_ok))
 
     # 5. Il supporto di alpha non esce dalla maschera confermata.
     same_shape = alpha.shape == mask.shape

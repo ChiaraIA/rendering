@@ -71,14 +71,13 @@ class SourceImage:
 
 class MaskOrigin(StrEnum):
     IMPORTED = "imported"
-    POLYGON = "polygon"
-    GRABCUT = "grabcut"
-    SAM = "sam"
+    POLYGON = "polygon"  # poligono proposto da un agente
+    REFINED = "refined"  # poligono rifinito sui bordi reali (GrabCut)
 
 
 class MaskStatus(StrEnum):
     PROPOSED = "proposed"
-    CONFIRMED = "confirmed"
+    APPROVED = "approved"  # approvata da un controllore indipendente
 
 
 class MaskRecord(BaseModel):
@@ -93,7 +92,8 @@ class MaskRecord(BaseModel):
     area_px: int
     soft_edge_px: int
     bbox: BBox | None
-    confirmed_at: str | None = None
+    approved_at: str | None = None
+    approved_by: str | None = None
 
 
 class TextureVariant(BaseModel):
@@ -157,15 +157,6 @@ class MaterialSpec(BaseModel):
         return (self.tile_w_mm + self.joint_mm, self.tile_h_mm + self.joint_mm)
 
 
-class LayoutParams(BaseModel):
-    """Il cliente sceglie solo il materiale. Fughe, schema e misure arrivano dal catalogo."""
-
-    model_config = ConfigDict(frozen=True)
-
-    material_id: str
-    seed: int | None = None  # None = derivato da immagine + materiale (deterministico)
-
-
 class FocalCheck(BaseModel):
     """Coerenza tra angoli cliccati, misure della stanza e focale EXIF."""
 
@@ -194,22 +185,6 @@ class PlaneGeometry(BaseModel):
     condition_number: float
     reprojection_error_px: float
     focal: FocalCheck
-
-
-class LightingParams(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    method: Literal["none"] = "none"  # M3: "lowpass_rectified", M6: "generative_hint"
-
-
-class RenderRequest(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    layout: LayoutParams
-    lighting: LightingParams = LightingParams()
-    render_mode: Literal["tiled", "flat"] = "tiled"  # "flat" = solo debug
-    supersampling: int = Field(4, ge=1, le=16)
-    output_format: Literal["png", "tiff"] = "png"
 
 
 TILE_NONE = np.iinfo(np.int32).min
@@ -274,33 +249,3 @@ class LayoutStats(BaseModel):
     tiles_cut: int
     px_per_mm_min: float
     px_per_mm_max: float
-
-
-class MaterialInfo(BaseModel):
-    id: str
-    name: str
-    version: str
-    variant_sha256: list[str]
-    catalog_sha256: str
-    flat_color_linear: tuple[float, float, float] | None = None
-
-
-class RenderReport(BaseModel):
-    schema_version: str
-    render_id: str
-    job_id: str
-    created_at: str
-    valid: bool
-    input: ImageMeta
-    mask: MaskRecord
-    request: RenderRequest
-    material: MaterialInfo
-    geometry: PlaneGeometry | None = None
-    layout: LayoutStats | None = None
-    checks: list[CheckResult]
-    warnings: list[str]
-    outputs: list[OutputFile]
-    final_sha256: str
-    determinism_key: str
-    versions: dict[str, str]
-    timings_ms: dict[str, float]

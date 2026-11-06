@@ -1,178 +1,154 @@
-"""CLI `posa`."""
+"""CLI `posa`: avvia il sistema multiagente da terminale, o l'interfaccia web."""
 
 from __future__ import annotations
 
-import time
+import asyncio
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 import typer
 
 from app.catalog.loader import Catalog
-from app.core.errors import PosaError
-from app.core.models import LayoutParams, RenderRequest
-from app.pipeline import render as pipeline
-from app.storage import jobstore
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
-mask_app = typer.Typer(no_args_is_help=True, help="Gestione della maschera.")
-catalog_app = typer.Typer(no_args_is_help=True, help="Catalogo materiali.")
-app.add_typer(mask_app, name="mask")
-app.add_typer(catalog_app, name="catalog")
-
-JobDir = Annotated[Path, typer.Argument(help="Cartella del job")]
-CatalogOpt = Annotated[Path | None, typer.Option("--catalog", help="catalog.json alternativo")]
 
 
-def _fail(exc: PosaError) -> typer.Exit:
-    typer.secho(f"errore: {exc}", fg=typer.colors.RED, err=True)
-    return typer.Exit(code=exc.exit_code)
+def _room(value: str | None) -> tuple[float, float] | None:
+    if not value:
+        return None
+    try:
+        a, b = value.lower().replace(",", ".").split("x")
+        return float(a), float(b)
+    except ValueError:
+        raise typer.BadParameter(
+            "formato misure: LUNGHEZZAxLARGHEZZA in metri, es. 4.2x3.6"
+        ) from None
+
+
+def _default_out() -> Path:
+    return Path("pratiche") / datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
 @app.command()
-def ingest(
-    photo: Annotated[Path, typer.Argument(help="Foto da elaborare (non viene modificata)")],
-    job: Annotated[Path, typer.Option("--job", help="Cartella del nuovo job")],
+def run(
+    foto: Annotated[Path, typer.Argument(help="Foto della stanza (JPEG, HEIC, PNG…)")],
+    materiale: Annotated[
+        str | None, typer.Option("--materiale", "-m", help="Codice a catalogo")
+    ] = None,
+    campione: Annotated[Path | None, typer.Option("--campione", help="Foto di un campione")] = None,
+    stanza: Annotated[
+        str | None, typer.Option("--stanza", help="Misure in metri, es. 4.2x3.6")
+    ] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="Cartella della pratica")] = None,
 ) -> None:
-    """Valida la foto, applica l'orientamento EXIF, calcola gli hash e crea il job."""
-    try:
-        j = pipeline.ingest_job(photo, job)
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    m = j.doc.image
-    typer.echo(f"job {j.doc.job_id} creato in {job}")
-    typer.echo(
-        f"  {m.width}x{m.height} {m.source_format} orient={m.exif_orientation} {m.color_space}"
-    )
-    typer.echo(f"  sha256 sorgente  {m.source_sha256}")
+    """Esegue una pratica completa con il sistema multiagente."""
+    from app.agents.orchestrator import run_job, start
 
-
-@mask_app.command("import")
-def mask_import(
-    job: JobDir, mask: Annotated[Path, typer.Argument(help="PNG in scala di grigi")]
-) -> None:
-    """Importa una maschera (stato: proposta). Va confermata prima del render."""
-    try:
-        rec = pipeline.import_mask(job, mask)
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    typer.echo(f"maschera proposta: {rec.area_px} px, bordo morbido {rec.soft_edge_px} px")
-    typer.echo(f"  sha256 {rec.mask_sha256}")
-    typer.echo(f"conferma con:  posa mask confirm {job} --sha {rec.mask_sha256[:12]}")
-
-
-@mask_app.command("confirm")
-def mask_confirm(
-    job: JobDir, sha: Annotated[str, typer.Option("--sha", help="Prefisso dello sha (>= 8)")]
-) -> None:
-    """Conferma la maschera attiva ripetendone lo sha."""
-    try:
-        rec = pipeline.confirm_mask(job, sha)
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    typer.echo(f"maschera {rec.mask_sha256[:12]} confermata ({rec.confirmed_at})")
-
-
-@app.command()
-def render(
-    job: JobDir,
-    material: Annotated[str, typer.Option("--material", help="id del materiale a catalogo")],
-    catalog: CatalogOpt = None,
-    fmt: Annotated[str, typer.Option("--format", help="png | tiff")] = "png",
-    keep_invalid: Annotated[
-        bool, typer.Option("--keep-invalid", help="Salva i risultati non validi in quarantine/")
-    ] = False,
-) -> None:
-    """Posa il materiale sulla maschera confermata, valida ed esporta."""
-    if fmt not in ("png", "tiff"):
-        typer.secho("errore: --format deve essere png o tiff", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-    output_format: Literal["png", "tiff"] = "png" if fmt == "png" else "tiff"
-    try:
-        cat = Catalog.load(catalog)
-        req = RenderRequest(layout=LayoutParams(material_id=material), output_format=output_format)
-        out = pipeline.render(job, req, cat, keep_invalid=keep_invalid)
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    _print_outcome(out)
-    if not out.valid:
-        raise typer.Exit(code=5)
-
-
-def _print_outcome(out: pipeline.RenderOutcome) -> None:
-    color = typer.colors.GREEN if out.valid else typer.colors.RED
-    typer.secho(f"{out.render_id}: {'VALIDO' if out.valid else 'NON VALIDO'}", fg=color)
-    for c in out.report.checks:
-        mark = "ok " if c.passed else "KO "
-        typer.echo(f"  {mark} {c.name}{'' if c.blocking else ' (warning)'}")
-    for w in out.report.warnings:
-        typer.echo(f"  !  {w}")
-    for o in out.report.outputs:
-        typer.echo(f"  -> {o.kind:10s} {o.path}")
-    typer.echo(f"  final sha256 {out.report.final_sha256}")
-
-
-@app.command()
-def status(job: JobDir) -> None:
-    """Mostra lo stato del job."""
-    try:
-        j = jobstore.load(job)
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    typer.echo(f"job {j.doc.job_id}  stato={j.doc.state}")
-    if j.doc.active_mask:
-        rec = j.doc.masks[j.doc.active_mask]
-        typer.echo(f"  maschera {rec.mask_sha256[:12]} {rec.status}")
-    for r in j.doc.renders:
-        typer.echo(f"  {r.render_id} {'valido' if r.valid else 'NON valido'} {r.final_sha256[:12]}")
-
-
-@catalog_app.command("list")
-def catalog_list(catalog: CatalogOpt = None) -> None:
-    """Elenca i materiali a catalogo."""
-    try:
-        cat = Catalog.load(catalog)
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    for m in cat.materials:
-        joint = f"fuga {m.joint_mm:g} mm" if m.joint_mm > 0 else "a incastro"
-        posa = m.pattern.type + (f" {m.pattern.rotation_deg}°" if m.pattern.rotation_deg else "")
-        typer.echo(
-            f"{m.id:26s} {m.tile_w_mm:g}x{m.tile_h_mm:g} mm  {joint:12s} {posa:16s}"
-            f" {len(m.variants)} varianti  {m.name}"
-        )
+    out = out or _default_out()
+    ws = start(foto, out, materiale, campione, _room(stanza), listener=typer.echo)
+    outcome = asyncio.run(run_job(ws, Catalog.load()))
+    typer.echo("\n" + (outcome.summary or ""))
+    if outcome.delivered:
+        typer.secho(f"\nRisultato in {out / 'consegna'}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"\nPratica non consegnata: vedi {out / 'stato.json'}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 @app.command()
 def demo(
-    out: Annotated[Path, typer.Option("--out", help="Cartella di output")] = Path("runs/demo"),
-    material: Annotated[str, typer.Option("--material")] = "gres-grigio-30x30",
-    width: int = 2000,
-    height: int = 1500,
+    out: Annotated[Path, typer.Option("--out")] = Path("pratiche/demo"),
+    materiale: Annotated[str, typer.Option("--materiale", "-m")] = "laminato-rovere-120x20",
 ) -> None:
-    """Genera una scena sintetica ed esegue l'intera pipeline."""
+    """Genera una stanza sintetica ed esegue il sistema multiagente su quella."""
     from app.devtools import synthetic
 
-    t0 = time.perf_counter()
-    out.mkdir(parents=True, exist_ok=True)
-    photo = synthetic.save_image(
-        synthetic.make_photo(width, height, seed=7), out / "foto.png", icc=synthetic.srgb_icc()
-    )
-    mask = synthetic.save_image(synthetic.make_mask(height, width, "holes"), out / "maschera.png")
-    try:
-        job = out / "job"
-        pipeline.ingest_job(photo, job)
-        rec = pipeline.import_mask(job, mask)
-        pipeline.confirm_mask(job, rec.mask_sha256[:12])
-        result = pipeline.render(
-            job, RenderRequest(layout=LayoutParams(material_id=material)), Catalog.load()
-        )
-    except PosaError as exc:
-        raise _fail(exc) from exc
-    _print_outcome(result)
-    typer.echo(f"  output in {result.render_dir}  ({time.perf_counter() - t0:.2f} s)")
-    if not result.valid:
-        raise typer.Exit(code=5)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    scene = synthetic.make_room_scene()
+    photo = out.parent / f"{out.name}_stanza.jpg"
+    synthetic.save_image(scene.photo, photo, fmt="JPEG", focal_35mm=26, camera=("Demo", "Phone"))
+    run(photo, materiale, None, "4.2x3.6", out)
+
+
+@app.command("catalogo")
+def catalogo() -> None:
+    """Elenca gli articoli a catalogo."""
+    for m in Catalog.load().materials:
+        joint = f"fuga {m.joint_mm:g} mm" if m.joint_mm > 0 else "a incastro"
+        typer.echo(f"{m.id:26s} {m.tile_w_mm / 10:g}x{m.tile_h_mm / 10:g} cm  {joint:12s} {m.name}")
+
+
+@app.command("aggiungi-materiale")
+def aggiungi_materiale(
+    foto: Annotated[
+        list[Path],
+        typer.Argument(
+            help="Foto di UNA piastrella/doga, frontale e ritagliata (una per variante)"
+        ),
+    ],
+    codice: Annotated[
+        str, typer.Option("--codice", help="Codice articolo, es. gres-antracite-60x60")
+    ],
+    nome: Annotated[str, typer.Option("--nome", help="Nome commerciale")],
+    formato: Annotated[str, typer.Option("--formato", help="Formato in cm, es. 60x60 o 120x20")],
+    fuga: Annotated[float, typer.Option("--fuga", help="Fuga in mm (0 = a incastro)")] = 0.0,
+    colore_fuga: Annotated[str | None, typer.Option("--colore-fuga", help="Es. #c8c4bc")] = None,
+    posa: Annotated[str, typer.Option("--posa", help="grid | running_bond")] = "grid",
+    sfalsamento: Annotated[
+        float, typer.Option("--sfalsamento", help="Solo running_bond: 0.5 = metà")
+    ] = 0.5,
+    rotazione: Annotated[int, typer.Option("--rotazione", help="0 | 45 | 90 rispetto ai muri")] = 0,
+    catalogo_path: Annotated[Path | None, typer.Option("--catalogo")] = None,
+) -> None:
+    """Aggiunge un articolo al catalogo a partire dalle foto delle piastrelle."""
+    import json
+    import shutil
+
+    from app.catalog.loader import DEFAULT_CATALOG
+    from app.core.ingest import sha256_file
+    from app.core.models import MaterialSpec
+
+    path = catalogo_path or DEFAULT_CATALOG
+    w_cm, h_cm = (float(x) for x in formato.lower().replace(",", ".").split("x"))
+    tex_dir = path.parent / "textures"
+    tex_dir.mkdir(parents=True, exist_ok=True)
+    variants = []
+    for k, f in enumerate(foto, 1):
+        dst = tex_dir / f"{codice}-v{k}{f.suffix.lower()}"
+        shutil.copyfile(f, dst)
+        variants.append({"texture_file": dst.name, "texture_sha256": sha256_file(dst)})
+    square = abs(w_cm - h_cm) < 1e-6
+    entry = {
+        "id": codice,
+        "name": nome,
+        "version": "1",
+        "tile_w_mm": w_cm * 10,
+        "tile_h_mm": h_cm * 10,
+        "joint_mm": fuga,
+        "joint_color": colore_fuga if fuga > 0 else None,
+        "pattern": {"type": posa, "bond_offset": sfalsamento, "rotation_deg": rotazione},
+        "variants": variants,
+        "variant_rotations": [0, 90, 180, 270] if square else [0, 180],
+        "texture_color_space": "srgb",
+    }
+    MaterialSpec.model_validate(entry)  # errore chiaro prima di toccare il catalogo
+    doc = json.loads(path.read_text())
+    doc["materials"] = [m for m in doc["materials"] if m["id"] != codice] + [entry]
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    Catalog.load(path).load_variants(Catalog.load(path).get(codice))
+    typer.secho(f"Aggiunto {codice} ({len(variants)} varianti) a {path}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def web(
+    port: Annotated[int, typer.Option(help="Porta")] = 7860,
+    share: Annotated[bool, typer.Option(help="Link pubblico temporaneo (Gradio)")] = False,
+) -> None:
+    """Avvia l'interfaccia web per la demo."""
+    from app.web import CSS, build_app
+
+    build_app().queue().launch(server_name="0.0.0.0", server_port=port, share=share, css=CSS)
 
 
 def main() -> None:
