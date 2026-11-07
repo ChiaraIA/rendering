@@ -149,7 +149,7 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                 gr.Gallery(
                     value=_catalog_gallery(cat),
                     label="Catalogo",
-                    columns=3,
+                    columns=4,
                     height=230,
                     allow_preview=False,
                 )

@@ -103,6 +103,33 @@
         270
       ],
       "texture_color_space": "srgb"
+    },
+    {
+      "id": "ceramica-blu-20x20",
+      "name": "Ceramica blu 20x20",
+      "version": "1",
+      "tile_w_mm": 200.0,
+      "tile_h_mm": 200.0,
+      "joint_mm": 3.0,
+      "joint_color": "#cfccc5",
+      "pattern": {
+        "type": "grid",
+        "bond_offset": 0.5,
+        "rotation_deg": 0
+      },
+      "variants": [
+        {
+          "texture_file": "ceramica-blu-20x20-v1.png",
+          "texture_sha256": "de4f86ff0d75dd30e10fc2cc30a0b96cfc8a0230625e32fb2a58e89993ba1cd2"
+        }
+      ],
+      "variant_rotations": [
+        0,
+        90,
+        180,
+        270
+      ],
+      "texture_color_space": "srgb"
     }
   ]
 }

@@ -148,6 +148,13 @@ def aggiungi_materiale(
             "(uno per foto, nello stesso ordine)",
         ),
     ] = None,
+    mantieni_luce: Annotated[
+        bool,
+        typer.Option(
+            "--mantieni-luce",
+            help="Con --angoli: non togliere riflessi e luce dello studio fotografico",
+        ),
+    ] = False,
     catalogo_path: Annotated[Path | None, typer.Option("--catalogo")] = None,
 ) -> None:
     """Aggiunge un articolo al catalogo a partire dalle foto delle piastrelle."""
@@ -170,7 +177,7 @@ def aggiungi_materiale(
         if angoli:
             dst = tex_dir / f"{codice}-v{k}.png"
             try:
-                rectify_tile(f, angoli[k - 1], w_cm, h_cm, dst)
+                rectify_tile(f, angoli[k - 1], w_cm, h_cm, dst, flatten=not mantieni_luce)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from exc
         else:
