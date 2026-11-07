@@ -402,11 +402,23 @@ class Toolbox:
             "✅ controllo-integrità: pixel fuori dal pavimento identici all'originale, "
             "risoluzione e profilo colore invariati"
         )
+        variants = self.catalog.load_variants(spec)
+        sample_sheet = self.ws.write_image(
+            overlays.contact_sheet(
+                [
+                    (f"variante {k + 1}", overlays.tile_patch(t, None, hexagon=spec.is_hex))
+                    for k, t in enumerate(variants)
+                ],
+                thumb=180,
+                cols=min(4, len(variants)),
+            ),
+            f"campionario_{spec.id}.jpg",
+        )
         verdict = await self._check(
             CheckRequest(
                 "revisore-finale",
                 prompts.CHECK_RENDER,
-                [ba],
+                [ba, sample_sheet],
                 f"Materiale: {spec.name}, {spec.tile_w_mm / 10:g}x{spec.tile_h_mm / 10:g} cm, fuga "
                 f"{spec.joint_mm:g} mm. Stanza {geom.length_mm / 1000:.2f} x "
                 f"{geom.width_mm / 1000:.2f} m. Controlli di integrità: tutti superati "

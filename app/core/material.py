@@ -202,6 +202,21 @@ class Laying:
         i, j, s, t = self.cell(a, b)
         return i, j, s, t, (s < self.tile_w) & (t < self.tile_h)
 
+    def bevel(
+        self,
+        dx: NDArray[np.float64],
+        dy: NDArray[np.float64],
+        width_mm: float = 2.0,
+        depth: float = 0.22,
+    ) -> NDArray[np.float32]:
+        """Esagoni: leggero scurimento lungo i lati (smusso delle cementine), in mm reali."""
+        apothem = SQRT3 / 2 * self.r_tile
+        proj = np.maximum.reduce(
+            [np.abs(dy), np.abs(SQRT3 / 2 * dx + dy / 2), np.abs(SQRT3 / 2 * dx - dy / 2)]
+        )
+        dist = np.maximum(apothem - proj, 0.0)
+        return (1.0 - depth * np.exp(-dist / width_mm)).astype(np.float32)
+
     def texcoords(
         self, s: NDArray[np.float64], t: NDArray[np.float64], rot_deg: NDArray[np.int64]
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -565,6 +580,8 @@ def tiled_layer(
             col[in_tile] = sample_texture(
                 atlas, var[in_tile], sn[in_tile], tn[in_tile], lod[in_tile]
             )
+            if laying.hex:  # smusso del bordo: ogni esagono resta leggibile anche tra due chiari
+                col[in_tile] *= laying.bevel(s[in_tile], t[in_tile])[:, None]
         return col, i, j, in_tile
 
     for start in range(0, ys.size, per_chunk):

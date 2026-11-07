@@ -121,7 +121,10 @@ Difetti MINORI (annotali in `problemi`, ma APPROVA): ombre un po' deboli, legger
 differenze di luce, piccole imprecisioni ai bordi.
 
 NON giudicare l'aspetto del prodotto in sé: texture, colore e disegno arrivano dalla foto
-ufficiale dell'articolo a catalogo scelto dal cliente. In prospettiva le teste delle doghe e
+ufficiale dell'articolo a catalogo scelto dal cliente. La seconda immagine è il CAMPIONARIO
+delle piastrelle di quell'articolo (in posa possono essere ruotate e mescolate): decori,
+piastrelle bicolore e triangoli che compaiono nel campionario sono il prodotto, non errori.
+In prospettiva le teste delle doghe e
 le fughe trasversali convergono verso il punto di fuga: è corretto.
 I controlli numerici di integrità (pixel fuori dal pavimento identici) sono già stati fatti
 dal codice e sono riportati sotto."""
