@@ -44,6 +44,16 @@ pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
 3. Si apre la scheda della porta 7860. Se non si apre, vai su **Ports → 7860 → Open in
    Browser**. Carica la tua foto e premi **"Posa il pavimento"**.
 
+**Se qualcosa non parte**
+- Nel terminale esegui `posa verifica`: controlla l'installazione e per ogni problema dice
+  come risolverlo. Con `posa verifica --online` fa anche una chiamata di prova agli agenti
+  (pochi centesimi).
+- Se il comando `posa` non esiste, l'installazione automatica non è finita o è fallita:
+  rilanciala con `pip install -e .`. Il dettaglio è nel log di creazione: Command Palette
+  (F1) → **"Codespaces: View Creation Log"**.
+- Se la chiave è stata aggiunta dopo aver creato il Codespace, il Codespace non la vede:
+  ricrealo oppure, solo per la sessione, `export ANTHROPIC_API_KEY=sk-ant-...`.
+
 ## Avvio rapido (demo)
 
 Requisiti: Python 3.11+ e una chiave API Anthropic.

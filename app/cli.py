@@ -30,6 +30,45 @@ def _default_out() -> Path:
     return Path("pratiche") / datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+def _require_credentials() -> None:
+    from app.diagnostics import credentials_problem
+
+    if problem := credentials_problem():
+        typer.secho(f"Impossibile avviare gli agenti: {problem}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+
+@app.command()
+def verifica(
+    online: Annotated[
+        bool, typer.Option("--online", help="Fa anche una chiamata di prova agli agenti (~0,1 USD)")
+    ] = False,
+) -> None:
+    """Controlla l'installazione e dice come risolvere ciò che manca."""
+    from app import config
+    from app.diagnostics import offline_checks, online_check
+
+    checks = offline_checks()
+    if online:
+        checks.append(asyncio.run(online_check(config.AGENT_MODEL)))
+    icon = {"ok": "✅", "avviso": "⚠️ ", "errore": "❌"}
+    for c in checks:
+        typer.echo(f"{icon[c.level]} {c.name}: {c.detail}")
+        if c.fix:
+            typer.echo(f"     → {c.fix}")
+    errors = [c for c in checks if c.level == "errore"]
+    if errors:
+        typer.secho(f"\n{len(errors)} problemi da risolvere.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    if any(c.level == "avviso" for c in checks):
+        typer.secho(
+            "\nInstallazione a posto, ma risolvi gli avvisi qui sopra prima di avviare gli agenti.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    typer.secho("\nTutto pronto: avvia la demo con  posa web", fg=typer.colors.GREEN)
+
+
 @app.command()
 def run(
     foto: Annotated[Path, typer.Argument(help="Foto della stanza (JPEG, HEIC, PNG…)")],
@@ -45,6 +84,7 @@ def run(
     """Esegue una pratica completa con il sistema multiagente."""
     from app.agents.orchestrator import run_job, start
 
+    _require_credentials()
     out = out or _default_out()
     ws = start(foto, out, materiale, campione, _room(stanza), listener=typer.echo)
     outcome = asyncio.run(run_job(ws, Catalog.load()))
@@ -165,8 +205,11 @@ def web(
     share: Annotated[bool, typer.Option(help="Link pubblico temporaneo (Gradio)")] = False,
 ) -> None:
     """Avvia l'interfaccia web per la demo."""
+    from app.diagnostics import credentials_problem
     from app.web import CSS, build_app
 
+    if problem := credentials_problem():  # la pagina si apre comunque, ma avvisiamo subito
+        typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
     build_app().queue().launch(server_name="0.0.0.0", server_port=port, share=share, css=CSS)
 
 

@@ -17,6 +17,7 @@ import gradio as gr
 from app.agents.orchestrator import run_job, start
 from app.catalog.loader import Catalog
 from app.core import overlays
+from app.diagnostics import credentials_problem
 
 WORKDIR = Path("pratiche")
 NONE_CHOICE = "— nessuno: uso la foto del campione —"
@@ -63,6 +64,9 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
     choices = [(f"{m.name} ({m.id})", m.id) for m in cat.materials] + [(NONE_CHOICE, "")]
 
     async def run(photo: str | None, material_id: str, sample: str | None, room: str):
+        if problem := credentials_problem():
+            yield f"⚠️ Gli agenti non possono partire: {problem}", "", None, [], None
+            return
         if not photo:
             yield "⚠️ Carica una foto della stanza.", "", None, [], None
             return

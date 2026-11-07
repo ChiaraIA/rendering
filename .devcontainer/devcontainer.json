@@ -1,7 +1,7 @@
 {
   "name": "posa",
-  "image": "mcr.microsoft.com/devcontainers/python:3.12",
-  "postCreateCommand": "pip install -e .",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "postCreateCommand": "python -m pip install --upgrade pip && python -m pip install -e . && posa verifica",
   "forwardPorts": [7860],
   "portsAttributes": {
     "7860": { "label": "posa (demo web)", "onAutoForward": "openBrowser" }
@@ -10,6 +10,5 @@
     "ANTHROPIC_API_KEY": {
       "description": "Chiave API Anthropic usata dagli agenti (console.anthropic.com)."
     }
-  },
-  "hostRequirements": { "cpus": 4, "memory": "8gb" }
+  }
 }
