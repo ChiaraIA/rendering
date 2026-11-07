@@ -271,7 +271,9 @@ class Toolbox:
             if spec.joint_mm > 0 and spec.joint_color:
                 c = spec.joint_color.lstrip("#")
                 joint = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
-            items.append((f"{spec.id} — {spec.name}", overlays.tile_patch(tex, joint)))
+            items.append(
+                (f"{spec.id} — {spec.name}", overlays.tile_patch(tex, joint, hexagon=spec.is_hex))
+            )
             out.append(
                 {
                     "codice": spec.id,
@@ -314,7 +316,9 @@ class Toolbox:
         if not req.sample_file:
             return {"errore": "il cliente non ha indicato né un codice né un campione"}
         tex = self.catalog.load_variants(spec)[0]
-        patch = self.ws.write_image(overlays.tile_patch(tex, None), f"materiale_{spec.id}.jpg")
+        patch = self.ws.write_image(
+            overlays.tile_patch(tex, None, hexagon=spec.is_hex), f"materiale_{spec.id}.jpg"
+        )
         self.ws.log(f"🧱 materiali: propone {spec.name} — {motivazione}")
         verdict = await self._check(
             CheckRequest(

@@ -96,6 +96,10 @@ class MaskRecord(BaseModel):
     approved_by: str | None = None
 
 
+Rotation = Literal[0, 60, 90, 120, 180, 240, 270, 300]
+SQRT3 = 3.0**0.5
+
+
 class TextureVariant(BaseModel):
     """Foto di una singola piastrella, frontale e ritagliata, senza fuga."""
 
@@ -103,6 +107,8 @@ class TextureVariant(BaseModel):
 
     texture_file: str
     texture_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    weight: float = Field(1.0, gt=0)  # frequenza relativa nella posa (collezioni miste)
+    rotations: list[Rotation] | None = None  # None = quelle del materiale
 
     @model_validator(mode="after")
     def _plain_name(self) -> TextureVariant:
@@ -113,11 +119,15 @@ class TextureVariant(BaseModel):
 
 
 class LayingPattern(BaseModel):
-    """Schema di posa: fissato dal materiale, mai scelto dal cliente."""
+    """Schema di posa: fissato dal materiale, mai scelto dal cliente.
+
+    `hex`: esagoni con lati piatti in alto e in basso; tile_w_mm = da punta a punta,
+    tile_h_mm = da lato a lato (= tile_w_mm * √3/2).
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    type: Literal["grid", "running_bond"] = "grid"
+    type: Literal["grid", "running_bond", "hex"] = "grid"
     bond_offset: float = Field(0.5, gt=0, lt=1)  # frazione di piastrella, solo running_bond
     rotation_deg: Literal[0, 45, 90] = 0  # rispetto ai muri (lati del rettangolo stanza)
 
@@ -134,18 +144,37 @@ class MaterialSpec(BaseModel):
     joint_color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{6}$")
     pattern: LayingPattern = LayingPattern()
     variants: list[TextureVariant] = Field(min_length=1)
-    variant_rotations: list[Literal[0, 90, 180, 270]] = [0]
+    variant_rotations: list[Rotation] = [0]
     texture_color_space: Literal["srgb"] = "srgb"
+
+    @property
+    def is_hex(self) -> bool:
+        return self.pattern.type == "hex"
+
+    def rotations_of(self, variant: int) -> list[int]:
+        own = self.variants[variant].rotations
+        return list(own if own else self.variant_rotations)
 
     @model_validator(mode="after")
     def _consistent(self) -> MaterialSpec:
         if self.joint_mm > 0 and self.joint_color is None:
             raise ValueError("joint_color obbligatorio se joint_mm > 0")
-        rots = self.variant_rotations
-        if not rots or len(set(rots)) != len(rots):
-            raise ValueError("variant_rotations deve contenere valori distinti")
-        if self.tile_w_mm != self.tile_h_mm and any(r in (90, 270) for r in rots):
-            raise ValueError("rotazioni 90/270 ammesse solo per piastrelle quadrate")
+        if self.is_hex and abs(self.tile_h_mm - self.tile_w_mm * SQRT3 / 2) > 0.02 * self.tile_h_mm:
+            raise ValueError("esagono: tile_h_mm (lato-lato) = tile_w_mm (punta-punta) × √3/2")
+        sets = [self.variant_rotations] + [v.rotations for v in self.variants if v.rotations]
+        for rots in sets:
+            if not rots or len(set(rots)) != len(rots):
+                raise ValueError("le rotazioni devono essere valori distinti")
+            if self.is_hex and any(r % 60 for r in rots):
+                raise ValueError("esagoni: rotazioni solo a multipli di 60°")
+            if not self.is_hex and any(r % 90 for r in rots):
+                raise ValueError("rotazioni solo a multipli di 90°")
+            if (
+                not self.is_hex
+                and self.tile_w_mm != self.tile_h_mm
+                and any(r in (90, 270) for r in rots)
+            ):
+                raise ValueError("rotazioni 90/270 ammesse solo per piastrelle quadrate")
         files = [v.texture_file for v in self.variants]
         if len(set(files)) != len(files):
             raise ValueError("varianti duplicate")
@@ -153,7 +182,10 @@ class MaterialSpec(BaseModel):
 
     @property
     def pitch_mm(self) -> tuple[float, float]:
-        """Passo della griglia: piastrella + fuga."""
+        """Passo: piastrella + fuga. Per gli esagoni: distanza tra centri (colonne, righe)."""
+        if self.is_hex:
+            r_lat = self.tile_w_mm / 2 + self.joint_mm / SQRT3
+            return (1.5 * r_lat, SQRT3 * r_lat)
         return (self.tile_w_mm + self.joint_mm, self.tile_h_mm + self.joint_mm)
 
 

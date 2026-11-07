@@ -116,25 +116,31 @@ def catalogo() -> None:
     """Elenca gli articoli a catalogo."""
     for m in Catalog.load().materials:
         joint = f"fuga {m.joint_mm:g} mm" if m.joint_mm > 0 else "a incastro"
-        typer.echo(f"{m.id:26s} {m.tile_w_mm / 10:g}x{m.tile_h_mm / 10:g} cm  {joint:12s} {m.name}")
+        typer.echo(
+            f"{m.id:26s} {m.tile_w_mm / 10:.4g}x{m.tile_h_mm / 10:.4g} cm  {joint:12s} {m.name}"
+        )
 
 
 @app.command("aggiungi-materiale")
 def aggiungi_materiale(
     foto: Annotated[
         list[Path],
-        typer.Argument(
-            help="Foto di UNA piastrella/doga, frontale e ritagliata (una per variante)"
-        ),
+        typer.Argument(help="Foto delle piastrelle della collezione (una per variante)"),
     ],
     codice: Annotated[
         str, typer.Option("--codice", help="Codice articolo, es. gres-antracite-60x60")
     ],
     nome: Annotated[str, typer.Option("--nome", help="Nome commerciale")],
-    formato: Annotated[str, typer.Option("--formato", help="Formato in cm, es. 60x60 o 120x20")],
+    formato: Annotated[
+        str,
+        typer.Option(
+            "--formato",
+            help="Formato in cm, es. 60x60 o 120x20; esagoni: larghezza da punta a punta, es. 25",
+        ),
+    ],
     fuga: Annotated[float, typer.Option("--fuga", help="Fuga in mm (0 = a incastro)")] = 0.0,
     colore_fuga: Annotated[str | None, typer.Option("--colore-fuga", help="Es. #c8c4bc")] = None,
-    posa: Annotated[str, typer.Option("--posa", help="grid | running_bond")] = "grid",
+    posa: Annotated[str, typer.Option("--posa", help="grid | running_bond | hex")] = "grid",
     sfalsamento: Annotated[
         float, typer.Option("--sfalsamento", help="Solo running_bond: 0.5 = metà")
     ] = 0.5,
@@ -143,9 +149,35 @@ def aggiungi_materiale(
         list[str] | None,
         typer.Option(
             "--angoli",
-            help="Foto in prospettiva: 4 angoli della faccia della piastrella in pixel, "
-            "ordine alto-sx alto-dx basso-dx basso-sx, es. --angoli '128,63 718,60 800,640 45,640' "
-            "(uno per foto, nello stesso ordine)",
+            help="Foto in prospettiva (rettangoli): 4 angoli della faccia in pixel, ordine "
+            "alto-sx alto-dx basso-dx basso-sx, es. '128,63 718,60 800,640 45,640' (uno per foto)",
+        ),
+    ] = None,
+    vertici: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--vertici",
+            help="Esagoni: 'auto' oppure 6 vertici x,y (punta destra, poi senso orario), "
+            "uno per foto. Senza questa opzione: tutti 'auto'",
+        ),
+    ] = None,
+    pesi: Annotated[
+        str | None,
+        typer.Option("--pesi", help="Frequenza di ogni variante nella posa, es. '3,2,1,1'"),
+    ] = None,
+    rotazioni: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--rotazioni",
+            help="Rotazioni ammesse per ogni foto, es. '0,180' o '0,60,120,180,240,300'",
+        ),
+    ] = None,
+    correzione: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--correzione",
+            help="Esagoni: guadagni R,G,B in luce lineare per ogni foto (es. '1.3,1.2,1.05'), "
+            "oppure 'no'. Serve a uniformare foto scattate con luce diversa",
         ),
     ] = None,
     mantieni_luce: Annotated[
@@ -157,45 +189,79 @@ def aggiungi_materiale(
     ] = False,
     catalogo_path: Annotated[Path | None, typer.Option("--catalogo")] = None,
 ) -> None:
-    """Aggiunge un articolo al catalogo a partire dalle foto delle piastrelle."""
+    """Aggiunge un articolo (o una collezione mista) al catalogo dalle foto delle piastrelle."""
     import json
     import shutil
 
     from app.catalog.loader import DEFAULT_CATALOG
     from app.core.ingest import sha256_file
-    from app.core.models import MaterialSpec
-    from app.storage.catalog_import import rectify_tile
+    from app.core.models import SQRT3, MaterialSpec
+    from app.storage.catalog_import import rectify_hexagon, rectify_tile
+
+    def per_photo(values: list[str] | None, name: str) -> list[str] | None:
+        if values is not None and len(values) != len(foto):
+            raise typer.BadParameter(f"serve un --{name} per ogni foto ({len(foto)})")
+        return values
 
     path = catalogo_path or DEFAULT_CATALOG
-    w_cm, h_cm = (float(x) for x in formato.lower().replace(",", ".").split("x"))
+    hexagon = posa == "hex"
+    sizes = [float(x) for x in formato.lower().replace(",", ".").split("x")]
+    w_cm = sizes[0]
+    h_cm = sizes[1] if len(sizes) > 1 else (w_cm * SQRT3 / 2 if hexagon else w_cm)
+    angoli = per_photo(angoli, "angoli")
+    vertici = per_photo(vertici, "vertici")
+    rotazioni = per_photo(rotazioni, "rotazioni")
+    correzione = per_photo(correzione, "correzione")
+    weights = [float(x) for x in pesi.split(",")] if pesi else [1.0] * len(foto)
+    if len(weights) != len(foto):
+        raise typer.BadParameter(f"--pesi: servono {len(foto)} valori")
     tex_dir = path.parent / "textures"
     tex_dir.mkdir(parents=True, exist_ok=True)
-    if angoli and len(angoli) != len(foto):
-        raise typer.BadParameter("serve un --angoli per ogni foto")
     variants = []
     for k, f in enumerate(foto, 1):
-        if angoli:
-            dst = tex_dir / f"{codice}-v{k}.png"
-            try:
+        try:
+            if hexagon:
+                dst = tex_dir / f"{codice}-v{k}.png"
+                v = vertici[k - 1] if vertici else "auto"
+                g = correzione[k - 1] if correzione else "no"
+                gains: tuple[float, float, float] | None = None
+                if g != "no":
+                    vals = [float(x) for x in g.split(",")]
+                    if len(vals) != 3:
+                        raise ValueError("--correzione: servono 3 valori R,G,B")
+                    gains = (vals[0], vals[1], vals[2])
+                rectify_hexagon(f, dst, None if v == "auto" else v, gains=gains)
+            elif angoli:
+                dst = tex_dir / f"{codice}-v{k}.png"
                 rectify_tile(f, angoli[k - 1], w_cm, h_cm, dst, flatten=not mantieni_luce)
-            except ValueError as exc:
-                raise typer.BadParameter(str(exc)) from exc
-        else:
-            dst = tex_dir / f"{codice}-v{k}{f.suffix.lower()}"
-            shutil.copyfile(f, dst)
-        variants.append({"texture_file": dst.name, "texture_sha256": sha256_file(dst)})
-    square = abs(w_cm - h_cm) < 1e-6
+            else:
+                dst = tex_dir / f"{codice}-v{k}{f.suffix.lower()}"
+                shutil.copyfile(f, dst)
+        except ValueError as exc:
+            raise typer.BadParameter(f"{f.name}: {exc}") from exc
+        entry_v: dict[str, object] = {
+            "texture_file": dst.name,
+            "texture_sha256": sha256_file(dst),
+            "weight": weights[k - 1],
+        }
+        if rotazioni:
+            entry_v["rotations"] = [int(r) for r in rotazioni[k - 1].split(",")]
+        variants.append(entry_v)
+    if hexagon:
+        default_rot = [0, 60, 120, 180, 240, 300]
+    else:
+        default_rot = [0, 90, 180, 270] if abs(w_cm - h_cm) < 1e-6 else [0, 180]
     entry = {
         "id": codice,
         "name": nome,
         "version": "1",
-        "tile_w_mm": w_cm * 10,
-        "tile_h_mm": h_cm * 10,
+        "tile_w_mm": round(w_cm * 10, 3),
+        "tile_h_mm": round(h_cm * 10, 3),
         "joint_mm": fuga,
         "joint_color": colore_fuga if fuga > 0 else None,
         "pattern": {"type": posa, "bond_offset": sfalsamento, "rotation_deg": rotazione},
         "variants": variants,
-        "variant_rotations": [0, 90, 180, 270] if square else [0, 180],
+        "variant_rotations": default_rot,
         "texture_color_space": "srgb",
     }
     MaterialSpec.model_validate(entry)  # errore chiaro prima di toccare il catalogo

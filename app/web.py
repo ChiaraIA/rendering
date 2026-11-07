@@ -37,7 +37,7 @@ def _catalog_gallery(cat: Catalog) -> list[tuple[Any, str]]:
             c = spec.joint_color.lstrip("#")
             joint = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
         caption = f"{spec.name} · {spec.tile_w_mm / 10:g}×{spec.tile_h_mm / 10:g} cm"
-        items.append((overlays.tile_patch(tex, joint), caption))
+        items.append((overlays.tile_patch(tex, joint, hexagon=spec.is_hex), caption))
     return items
 
 

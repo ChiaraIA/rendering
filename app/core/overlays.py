@@ -186,15 +186,29 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines
 
 
-def tile_patch(texture: Arr, joint_rgb: tuple[int, int, int] | None, reps: int = 2) -> Arr:
-    """Piccolo campione di posa (2x2 piastrelle con fuga) per mostrare un materiale."""
+def tile_patch(
+    texture: Arr, joint_rgb: tuple[int, int, int] | None, reps: int = 2, hexagon: bool = False
+) -> Arr:
+    """Piccolo campione di posa (2x2 piastrelle con fuga) per mostrare un materiale.
+    Per gli esagoni mostra la singola piastrella su fondo bianco."""
+    if hexagon:
+        h, w = texture.shape[:2]
+        mask = Image.new("L", (w, h), 0)
+        r = w / 2
+        pts = [
+            (w / 2 + r * np.cos(np.deg2rad(a)), h / 2 + r * np.sin(np.deg2rad(a)))
+            for a in range(0, 360, 60)
+        ]
+        ImageDraw.Draw(mask).polygon(pts, fill=255)
+        m = (np.asarray(mask, dtype=np.float32) / 255.0)[..., None]
+        return (texture[..., :3] * m + 255 * (1 - m)).astype(np.uint8)
     h, w = texture.shape[:2]
     j = max(2, w // 60) if joint_rgb else 0
     out = np.full(
         (reps * h + (reps + 1) * j, reps * w + (reps + 1) * j, 3), joint_rgb or (0, 0, 0), np.uint8
     )
-    for r in range(reps):
+    for r_ in range(reps):
         for c in range(reps):
-            y, x = j + r * (h + j), j + c * (w + j)
+            y, x = j + r_ * (h + j), j + c * (w + j)
             out[y : y + h, x : x + w] = texture[..., :3]
     return out

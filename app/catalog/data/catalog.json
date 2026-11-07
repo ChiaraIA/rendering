@@ -130,6 +130,110 @@
         270
       ],
       "texture_color_space": "srgb"
+    },
+    {
+      "id": "esagona-mix-beige-25",
+      "name": "Esagona mix beige 25 (cementine)",
+      "version": "1",
+      "tile_w_mm": 250.0,
+      "tile_h_mm": 216.506,
+      "joint_mm": 3.0,
+      "joint_color": "#c9c3b8",
+      "pattern": {
+        "type": "hex",
+        "bond_offset": 0.5,
+        "rotation_deg": 0
+      },
+      "variants": [
+        {
+          "texture_file": "esagona-mix-beige-25-v1.png",
+          "texture_sha256": "f63835d6e642585c02a7e4e58f01729f8564c02157abcf7d7330964376a36cb3",
+          "weight": 3.0,
+          "rotations": [
+            0,
+            60,
+            120,
+            180,
+            240,
+            300
+          ]
+        },
+        {
+          "texture_file": "esagona-mix-beige-25-v2.png",
+          "texture_sha256": "cf51205cb9280339e9f3fa136693f5e541b8ec2f715101bfe57c7778bd09055a",
+          "weight": 2.0,
+          "rotations": [
+            0,
+            60,
+            120,
+            180,
+            240,
+            300
+          ]
+        },
+        {
+          "texture_file": "esagona-mix-beige-25-v3.png",
+          "texture_sha256": "03888733a028280d0c6f3a59f45aff1d7fdfa2688c7e48af055def2f42d18a3f",
+          "weight": 2.0,
+          "rotations": [
+            0,
+            60,
+            120,
+            180,
+            240,
+            300
+          ]
+        },
+        {
+          "texture_file": "esagona-mix-beige-25-v4.png",
+          "texture_sha256": "d1f15a9d9a6c40fe7ec54467170bb4fa9db24d48a5e57a8f9ed2a810ce693c1b",
+          "weight": 1.5,
+          "rotations": [
+            0,
+            60,
+            120,
+            180,
+            240,
+            300
+          ]
+        },
+        {
+          "texture_file": "esagona-mix-beige-25-v5.png",
+          "texture_sha256": "1e41258777b81d0e226fbb61c1313b95fb08d323102189bb473b725a0c8cf633",
+          "weight": 1.0,
+          "rotations": [
+            0,
+            180
+          ]
+        },
+        {
+          "texture_file": "esagona-mix-beige-25-v6.png",
+          "texture_sha256": "21262941fd845ebd58b1ec8c050d52ec460cbdf0d424ebb17699adbb7772c25d",
+          "weight": 1.0,
+          "rotations": [
+            0,
+            180
+          ]
+        },
+        {
+          "texture_file": "esagona-mix-beige-25-v7.png",
+          "texture_sha256": "ef2d71538463101f5c8484d1251a891f49151d2615eb1289b7436f18287d631e",
+          "weight": 1.0,
+          "rotations": [
+            0,
+            180
+          ]
+        }
+      ],
+      "variant_rotations": [
+        0,
+        60,
+        120,
+        180,
+        240,
+        300
+      ],
+      "texture_color_space": "srgb"
     }
   ]
 }

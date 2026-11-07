@@ -20,6 +20,7 @@ from app.core import geometry
 from app.core.colorspace import SRGB_LIKE, convert_srgb_to_profile, to_linear, trc_for
 from app.core.errors import CatalogError
 from app.core.models import (
+    SQRT3,
     TILE_NONE,
     BBox,
     MaterialLayer,
@@ -91,7 +92,12 @@ def flat_layer(
 
 @dataclass(frozen=True)
 class Laying:
-    """Regole di posa del materiale applicate a una stanza L x W."""
+    """Regole di posa del materiale applicate a una stanza L x W.
+
+    Rettangoli: griglia (eventualmente sfalsata) con passo piastrella + fuga.
+    Esagoni (lati piatti in alto/basso): reticolo con raggio `r_lat` = raggio della
+    piastrella + fuga/√3, così tra due lati affacciati restano esattamente `joint` mm.
+    """
 
     tile_w: float
     tile_h: float
@@ -102,12 +108,16 @@ class Laying:
     sin: float
     cx: float
     cy: float
+    hex: bool = False
+    r_tile: float = 0.0  # esagoni: raggio (centro-punta) della piastrella
+    r_lat: float = 0.0  # esagoni: raggio del reticolo (piastrella + mezza fuga per lato)
 
     @classmethod
     def of(cls, spec: MaterialSpec, length_mm: float, width_mm: float) -> Laying:
         pw, ph = spec.pitch_mm
         shift = spec.pattern.bond_offset * pw if spec.pattern.type == "running_bond" else 0.0
         th = math.radians(spec.pattern.rotation_deg)
+        r_tile = spec.tile_w_mm / 2
         return cls(
             spec.tile_w_mm,
             spec.tile_h_mm,
@@ -118,7 +128,16 @@ class Laying:
             math.sin(th),
             length_mm / 2,
             width_mm / 2,
+            hex=spec.is_hex,
+            r_tile=r_tile,
+            r_lat=r_tile + spec.joint_mm / SQRT3,
         )
+
+    @property
+    def tile_area(self) -> float:
+        if self.hex:
+            return 1.5 * SQRT3 * self.r_tile**2
+        return self.tile_w * self.tile_h
 
     def local(
         self, u: NDArray[np.float64], v: NDArray[np.float64]
@@ -134,7 +153,7 @@ class Laying:
     def cell(
         self, a: NDArray[np.float64], b: NDArray[np.float64]
     ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64], NDArray[np.float64]]:
-        """(i, j, s, t): indici della piastrella e posizione locale nella cella in mm."""
+        """Rettangoli: (i, j, s, t) = indici della piastrella e posizione nella cella in mm."""
         qb = b + self.tile_h / 2
         j = np.floor(qb / self.pitch_h)
         t = qb - j * self.pitch_h
@@ -143,12 +162,72 @@ class Laying:
         s = qa - i * self.pitch_w
         return i.astype(np.int64), j.astype(np.int64), s, t
 
+    # ------------------------------------------------------------------ esagoni
+    def hex_center(self, q: NDArray[np.float64] | float, r: NDArray[np.float64] | float):  # type: ignore[no-untyped-def]
+        """Centro (a, b) dell'esagono di coordinate assiali (q, r)."""
+        return 1.5 * self.r_lat * q, SQRT3 * self.r_lat * (r + np.asarray(q) / 2)
+
+    def hex_cell(
+        self, a: NDArray[np.float64], b: NDArray[np.float64]
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64], NDArray[np.float64]]:
+        """(q, r, dx, dy): esagono più vicino (arrotondamento cubico) e posizione dal centro."""
+        qf = (2.0 / 3.0) * a / self.r_lat
+        rf = (-a / 3.0 + SQRT3 / 3.0 * b) / self.r_lat
+        sf = -qf - rf
+        q, r, s = np.rint(qf), np.rint(rf), np.rint(sf)
+        dq, dr, ds = np.abs(q - qf), np.abs(r - rf), np.abs(s - sf)
+        fix_q = (dq > dr) & (dq > ds)
+        fix_r = ~fix_q & (dr > ds)
+        q = np.where(fix_q, -r - s, q)
+        r = np.where(fix_r, -q - s, r)
+        ca, cb = self.hex_center(q, r)
+        return q.astype(np.int64), r.astype(np.int64), a - ca, b - cb
+
+    # ------------------------------------------------------------ interfaccia unica
+    def locate(
+        self, a: NDArray[np.float64], b: NDArray[np.float64]
+    ) -> tuple[
+        NDArray[np.int64],
+        NDArray[np.int64],
+        NDArray[np.float64],
+        NDArray[np.float64],
+        NDArray[np.bool_],
+    ]:
+        """(i, j, s, t, dentro_piastrella) per qualunque schema di posa."""
+        if self.hex:
+            q, r, dx, dy = self.hex_cell(a, b)
+            ady, adx = np.abs(dy), np.abs(dx)
+            inside = (ady <= SQRT3 / 2 * self.r_tile) & (SQRT3 * adx + ady <= SQRT3 * self.r_tile)
+            return q, r, dx, dy, inside
+        i, j, s, t = self.cell(a, b)
+        return i, j, s, t, (s < self.tile_w) & (t < self.tile_h)
+
+    def texcoords(
+        self, s: NDArray[np.float64], t: NDArray[np.float64], rot_deg: NDArray[np.int64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Coordinate normalizzate nella texture, con la rotazione della piastrella."""
+        if self.hex:
+            th = np.deg2rad(rot_deg.astype(np.float64))
+            c, sn_ = np.cos(th), np.sin(th)
+            dx = s * c + t * sn_
+            dy = -s * sn_ + t * c
+            return (dx + self.r_tile) / (2 * self.r_tile), (dy + SQRT3 / 2 * self.r_tile) / (
+                SQRT3 * self.r_tile
+            )
+        return _rotate_uv(s / self.tile_w, t / self.tile_h, rot_deg)
+
     def tile_polygon(self, i: int, j: int) -> NDArray[np.float64]:
-        """Angoli della piastrella (i, j) sul piano della stanza, in mm."""
-        a0 = i * self.pitch_w - self.tile_w / 2 + j * self.shift
-        b0 = j * self.pitch_h - self.tile_h / 2
-        a = np.array([a0, a0 + self.tile_w, a0 + self.tile_w, a0])
-        b = np.array([b0, b0, b0 + self.tile_h, b0 + self.tile_h])
+        """Contorno della piastrella (i, j) sul piano della stanza, in mm."""
+        if self.hex:
+            ca, cb = self.hex_center(float(i), float(j))
+            ang = np.deg2rad(np.arange(6) * 60.0)
+            a = ca + self.r_tile * np.cos(ang)
+            b = cb + self.r_tile * np.sin(ang)
+        else:
+            a0 = i * self.pitch_w - self.tile_w / 2 + j * self.shift
+            b0 = j * self.pitch_h - self.tile_h / 2
+            a = np.array([a0, a0 + self.tile_w, a0 + self.tile_w, a0])
+            b = np.array([b0, b0, b0 + self.tile_h, b0 + self.tile_h])
         u, v = self.to_plane(a, b)
         return np.stack([u, v], axis=1)
 
@@ -158,6 +237,11 @@ class Laying:
         """Indici (i0, i1, j0, j1) inclusivi che coprono la stanza, più un margine."""
         rect = geometry.room_rect(length_mm, width_mm)
         a, b = self.local(rect[:, 0], rect[:, 1])
+        if self.hex:
+            qf = (2.0 / 3.0) * a / self.r_lat
+            rf = (-a / 3.0 + SQRT3 / 3.0 * b) / self.r_lat
+            q0, q1 = math.floor(qf.min()) - margin, math.ceil(qf.max()) + margin
+            return q0, q1, math.floor(rf.min()) - margin, math.ceil(rf.max()) + margin
         j0 = math.floor((b.min() + self.tile_h / 2) / self.pitch_h) - margin
         j1 = math.floor((b.max() + self.tile_h / 2) / self.pitch_h) + margin
         shifts = (j0 * self.shift, j1 * self.shift)
@@ -176,20 +260,25 @@ def _splitmix(x: NDArray[np.uint64]) -> NDArray[np.uint64]:
 
 @dataclass(frozen=True)
 class VariantMap:
-    """Variante e rotazione di ogni piastrella. Ancorata alla stanza, non alla maschera.
+    """Variante e rotazione (in gradi) di ogni piastrella. Ancorata alla stanza, non alla maschera.
 
-    Dentro la stanza: assegnazione riga per riga con PCG64(seed); con >= 3 varianti una
-    piastrella non ripete la variante di quella a sinistra né di quella sopra.
-    Fuori (maschera più grande della stanza): hash deterministico di (i, j, seed).
+    Dentro la stanza: estrazione pesata riga per riga con PCG64(seed); con >= 3 varianti una
+    piastrella evita la variante di quella "a sinistra" e di quella "sopra" (negli indici della
+    posa): divieto se i pesi sono uguali, probabilità ridotta se diversi.
+    Fuori (maschera più grande della stanza): hash deterministico.
     """
 
     i0: int
     j0: int
     variant: NDArray[np.int64]  # (nj, ni)
-    rotation: NDArray[np.int64]  # (nj, ni) indice in variant_rotations
-    n_variants: int
-    n_rotations: int
+    rotation: NDArray[np.int64]  # (nj, ni) gradi
+    weights: NDArray[np.float64]
+    rotations: tuple[tuple[int, ...], ...]  # rotazioni ammesse per variante
     seed: int
+
+    @property
+    def n_variants(self) -> int:
+        return len(self.weights)
 
     @classmethod
     def build(
@@ -197,23 +286,27 @@ class VariantMap:
     ) -> VariantMap:
         i0, i1, j0, j1 = laying.index_range(length_mm, width_mm)
         ni, nj = i1 - i0 + 1, j1 - j0 + 1
-        nv, nr = len(spec.variants), len(spec.variant_rotations)
+        nv = len(spec.variants)
+        weights = np.array([v.weight for v in spec.variants], dtype=np.float64)
+        rots = tuple(tuple(spec.rotations_of(k)) for k in range(nv))
         rng = np.random.Generator(np.random.PCG64(seed))
         var = np.zeros((nj, ni), dtype=np.int64)
-        rot = rng.integers(0, nr, size=(nj, ni))
+        rot = np.zeros((nj, ni), dtype=np.int64)
+        # pesi uguali: mai due varianti uguali affiancate; pesi diversi (collezioni miste):
+        # solo scoraggiate, altrimenti le varianti frequenti non raggiungerebbero la loro quota
+        repeat = 0.0 if np.allclose(weights, weights[0]) else 0.5
         for jj in range(nj):
             for ii in range(ni):
+                w = weights.copy()
                 if nv >= 3:
-                    banned = set()
                     if ii > 0:
-                        banned.add(int(var[jj, ii - 1]))
+                        w[var[jj, ii - 1]] *= repeat
                     if jj > 0:
-                        banned.add(int(var[jj - 1, ii]))
-                    choices = [k for k in range(nv) if k not in banned]
-                    var[jj, ii] = choices[int(rng.integers(0, len(choices)))]
-                else:
-                    var[jj, ii] = int(rng.integers(0, nv))
-        return cls(i0, j0, var, rot, nv, nr, seed)
+                        w[var[jj - 1, ii]] *= repeat
+                k = int(rng.choice(nv, p=w / w.sum()))
+                var[jj, ii] = k
+                rot[jj, ii] = rots[k][int(rng.integers(0, len(rots[k])))]
+        return cls(i0, j0, var, rot, weights, rots, seed)
 
     def lookup(
         self, i: NDArray[np.int64], j: NDArray[np.int64]
@@ -233,8 +326,15 @@ class VariantMap:
                 ^ np.uint64(self.seed & 0xFFFFFFFFFFFFFFFF)
             )
             h = _splitmix(key)
-            var[out] = (h % np.uint64(self.n_variants)).astype(np.int64)
-            rot[out] = ((h >> np.uint64(20)) % np.uint64(self.n_rotations)).astype(np.int64)
+            u = (h >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+            cum = np.cumsum(self.weights) / self.weights.sum()
+            k = np.minimum(np.searchsorted(cum, u, side="right"), self.n_variants - 1)
+            var[out] = k
+            pick = (h >> np.uint64(3)) & np.uint64(0xFF)
+            rot[out] = [
+                self.rotations[kk][int(pp) % len(self.rotations[kk])]
+                for kk, pp in zip(k, pick, strict=True)
+            ]
         return var, rot
 
 
@@ -271,7 +371,7 @@ def count_tiles(spec: MaterialSpec, length_mm: float, width_mm: float) -> tuple[
     """(piastrelle intere, piastrelle tagliate) necessarie per la stanza."""
     laying = Laying.of(spec, length_mm, width_mm)
     i0, i1, j0, j1 = laying.index_range(length_mm, width_mm)
-    full = spec.tile_w_mm * spec.tile_h_mm
+    full = laying.tile_area
     whole = cut = 0
     for j in range(j0, j1 + 1):
         for i in range(i0, i1 + 1):
@@ -443,7 +543,6 @@ def tiled_layer(
 
     laying = Laying.of(spec, geom.length_mm, geom.width_mm)
     vmap = VariantMap.build(spec, laying, geom.length_mm, geom.width_mm, seed)
-    rotations = np.asarray(spec.variant_rotations, dtype=np.int64)
     hi = np.asarray(geom.H_inv, dtype=np.float64)
 
     x0, y0, x1, y1 = bbox
@@ -458,10 +557,9 @@ def tiled_layer(
         u: NDArray[np.float64], v: NDArray[np.float64], lod: NDArray[np.float64]
     ) -> tuple[NDArray[np.float32], NDArray[np.int64], NDArray[np.int64], NDArray[np.bool_]]:
         a, b = laying.local(u, v)
-        i, j, s, t = laying.cell(a, b)
-        in_tile = (s < laying.tile_w) & (t < laying.tile_h)
+        i, j, s, t, in_tile = laying.locate(a, b)
         var, rot = vmap.lookup(i, j)
-        sn, tn = _rotate_uv(s / laying.tile_w, t / laying.tile_h, rotations[rot])
+        sn, tn = laying.texcoords(s, t, rot)
         col = np.broadcast_to(joint, (u.size, 3)).copy()
         if np.any(in_tile):
             col[in_tile] = sample_texture(
@@ -505,8 +603,8 @@ def shade_ids(
     laying: Laying, u: NDArray[np.float64], v: NDArray[np.float64]
 ) -> tuple[None, NDArray[np.int64], NDArray[np.int64], NDArray[np.bool_]]:
     a, b = laying.local(u, v)
-    i, j, s, t = laying.cell(a, b)
-    return None, i, j, (s < laying.tile_w) & (t < laying.tile_h)
+    i, j, _, _, inside = laying.locate(a, b)
+    return None, i, j, inside
 
 
 def _bbox(mask: NDArray[np.uint8]) -> BBox:
