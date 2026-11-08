@@ -151,6 +151,7 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                     label="Catalogo",
                     columns=4,
                     height=230,
+                    object_fit="contain",  # niente ritaglio: gli esagoni restano interi
                     allow_preview=False,
                 )
                 sample = gr.File(
@@ -177,6 +178,7 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                     label="Lavoro degli agenti (maschere, griglie, verifiche)",
                     columns=4,
                     height=200,
+                    object_fit="contain",
                 )
                 files = gr.File(
                     label="Scarica (risultato a piena risoluzione, maschera, report)",
