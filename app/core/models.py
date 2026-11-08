@@ -133,6 +133,9 @@ class LayingPattern(BaseModel):
     rotation_deg: Literal[0, 45, 90] = 0  # rispetto ai muri (lati del rettangolo stanza)
 
 
+Finish = Literal["opaca", "satinata", "lucida"]
+
+
 class MaterialSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -147,6 +150,7 @@ class MaterialSpec(BaseModel):
     variants: list[TextureVariant] = Field(min_length=1)
     variant_rotations: list[Rotation] = [0]
     texture_color_space: Literal["srgb"] = "srgb"
+    finish: Finish = "opaca"  # finitura della superficie: decide quanto riflette
 
     @property
     def is_hex(self) -> bool:
@@ -235,6 +239,28 @@ class MaterialLayer:
     tile_ij: NDArray[np.int32] | None = None  # (h, w, 2) indici piastrella; TILE_NONE = fuga
 
 
+class LightParams(BaseModel):
+    """Regolazioni di luci e ombre del nuovo pavimento (decise dall'agente "luci").
+
+    - ombre: quanto delle ombre della foto (sotto tavoli, sedie, mobili) passa al nuovo
+      pavimento. 1 = come nella foto, 0 = nessuna.
+    - riflessi: quanto dei riflessi del vecchio pavimento (luci, tende, mobili) resta sul
+      nuovo. Dipende dalla finitura: opaca quasi nulla, lucida molto.
+    - contatto: ombra di contatto vicino a ciò che poggia a terra e ai muri. 1 = standard.
+    - luce_calda: quanto il pavimento prende il colore della luce della stanza (0..1).
+    - grana: rumore della fotocamera come nel resto della foto (1 = uguale, 0 = nessuno):
+      un pavimento perfettamente pulito in una foto notturna sembra incollato.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ombre: float = Field(0.8, ge=0.0, le=1.5)
+    riflessi: float = Field(0.1, ge=0.0, le=1.0)
+    contatto: float = Field(0.6, ge=0.0, le=1.5)
+    luce_calda: float = Field(1.0, ge=0.0, le=1.0)
+    grana: float = Field(1.0, ge=0.0, le=2.0)
+
+
 @dataclass(frozen=True, eq=False)
 class LightMap:
     """Guadagno di luce a bassa frequenza (M3). Shape (h, w), limitato a `bbox`.
@@ -246,6 +272,8 @@ class LightMap:
     gain: NDArray[np.float32]
     bbox: BBox
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    # riflessi e lucentezza (lineari, (h, w, 3)) da aggiungere sopra il materiale illuminato
+    add: NDArray[np.float32] | None = None
 
 
 class CheckResult(BaseModel):

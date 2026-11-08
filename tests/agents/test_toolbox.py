@@ -92,6 +92,7 @@ async def _happy_path(tb: Toolbox) -> dict:
     corners = SCENE.corners_px.tolist()  # preview = foto (640 px)
     assert (await tb.proponi_geometria(corners))["esito"] == "APPROVATO"
     assert (await tb.scegli_materiale("gres-grigio-30x30"))["esito"] == "APPROVATO"
+    assert (await tb.proponi_luce())["esito"] == "APPROVATO"
     assert (await tb.esegui_posa())["esito"] == "APPROVATO"
     return await tb.consegna()
 
@@ -126,6 +127,7 @@ def test_happy_path_delivers_and_keeps_original(
     assert [r.checker for r in checker.seen] == [
         "controllo-maschera",
         "controllo-geometria",
+        "controllo-luce",
         "revisore-finale",
     ]
     report = json.loads((ws.root / "consegna" / "report.json").read_text())
@@ -186,6 +188,7 @@ def test_integrity_failure_blocks_delivery(
     _run(tb.proponi_maschera(floor, excl))
     _run(tb.proponi_geometria(SCENE.corners_px.tolist()))
     _run(tb.scegli_materiale("gres-grigio-30x30"))
+    _run(tb.proponi_luce())
     r = _run(tb.esegui_posa())
     assert r["esito"] == "BOCCIATO" and r["controllore"] == "controllo-integrità"
     assert "revisore-finale" not in [c.checker for c in checker.seen]  # nemmeno mostrato
@@ -302,3 +305,49 @@ def test_without_segmenter_falls_back_to_polygons(
     floor, excl = _floor_mask_polys()
     r = _run(tb.proponi_maschera(floor, excl, base="automatica"))
     assert r["esito"] == "APPROVATO" and "non disponibile" in r["nota"]
+
+
+def _ready_for_light(tmp_path: Path, photo: Path, catalog: Catalog, checker: ScriptedChecker):  # type: ignore[no-untyped-def]
+    ws = _ws(tmp_path, photo)
+    tb = Toolbox(ws, catalog, checker)
+    floor, excl = _floor_mask_polys()
+    _run(tb.proponi_maschera(floor, excl))
+    _run(tb.proponi_geometria(SCENE.corners_px.tolist()))
+    _run(tb.scegli_materiale("gres-grigio-30x30"))
+    return ws, tb
+
+
+def test_light_is_a_gated_step_judged_by_its_own_checker(
+    tmp_path: Path, photo: Path, catalog: Catalog
+) -> None:
+    checker = ScriptedChecker({"controllo-luce": [False, True]})
+    ws, tb = _ready_for_light(tmp_path, photo, catalog, checker)
+    assert st.next_step(ws.state).startswith("luce")
+    assert "luci e ombre" in _run(tb.esegui_posa())["errore"]  # cancello chiuso
+    r = _run(tb.proponi_luce())
+    assert r["esito"] == "BOCCIATO" and ws.state.light is None
+    req = checker.seen[-1]
+    assert req.checker == "controllo-luce" and len(req.images) == 2
+    assert "finitura opaca" in req.context
+    r = _run(tb.proponi_luce(ombre=1.2, contatto=0.9, motivazione="ombre deboli"))
+    assert r["esito"] == "APPROVATO"
+    assert ws.state.light is not None and ws.state.light.ombre == 1.2
+    assert ws.state.light.riflessi == 0.1  # partenza della finitura opaca, non toccata
+    assert _run(tb.esegui_posa())["esito"] == "APPROVATO"
+    assert ws.state.render is not None and ws.state.render.light_sha256 == ws.state.light_sha256
+
+
+def test_light_params_are_validated_and_change_the_floor(
+    tmp_path: Path, photo: Path, catalog: Catalog
+) -> None:
+    ws, tb = _ready_for_light(tmp_path, photo, catalog, ScriptedChecker())
+    assert "non validi" in _run(tb.proponi_luce(ombre=5.0))["errore"]
+    from app.core.models import LightParams
+
+    flat = tb._composite_sync(LightParams(ombre=0, riflessi=0, contatto=0, grana=0))
+    rich = tb._composite_sync(LightParams(ombre=1.5, contatto=1.5))
+    inside = flat.alpha == 255
+    assert not np.array_equal(flat.pixels[inside], rich.pixels[inside])
+    outside = flat.alpha == 0
+    assert np.array_equal(flat.pixels[outside], rich.pixels[outside])  # fuori: identico
+    assert np.array_equal(rich.pixels[outside], ws.source.pixels[outside])

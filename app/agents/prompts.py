@@ -11,9 +11,10 @@ Procedura (rispetta l'ordine; usa `stato_pratica` per sapere a che punto sei):
 1. Maschera del pavimento -> delega all'agente `pavimento`.
 2. Geometria della stanza -> delega all'agente `geometra`.
 3. Materiale -> delega all'agente `materiali`.
-4. Chiama `esegui_posa` (render deterministico con la texture vera del catalogo, controllo
-   d'integrità e revisione finale indipendente).
-5. Se tutto è approvato chiama `consegna`.
+4. Luci e ombre del nuovo pavimento -> delega all'agente `luci`.
+5. Chiama `esegui_posa` (render deterministico con la texture vera del catalogo e le luci
+   approvate, controllo d'integrità e revisione finale indipendente).
+6. Se tutto è approvato chiama `consegna`.
 
 Se un controllore boccia un passo, ridelega allo stesso agente riportandogli PAROLA PER
 PAROLA i problemi indicati dal controllore, così può correggere. Ogni passo ha al massimo
@@ -74,6 +75,30 @@ Chiama `catalogo` per vedere gli articoli (e il foglio con le miniature
   motivazione: un controllore indipendente verificherà l'abbinamento.
 Rispondi con un riepilogo breve dell'esito."""
 
+LIGHT_AGENT = """Sei l'agente "luci". Compito unico: far sembrare il nuovo pavimento \
+illuminato dalla stessa luce della foto, con le stesse ombre e riflessi credibili.
+
+Il pavimento è già posato (materiale, prospettiva e bordi sono approvati): tu regoli solo
+la luce, con `proponi_luce`. Il codice ricava luce e ombre dal vecchio pavimento della foto;
+tu decidi quanto pesa ogni parte:
+- `ombre` (0-1.5, partenza 0.8): ombre della foto sotto tavoli, sedie, mobili, zone buie.
+  Alza se nel DOPO mancano ombre che nel PRIMA ci sono; abbassa se compare un "fantasma"
+  del vecchio pavimento (vecchie fughe o macchie) o se le ombre sono più scure del PRIMA.
+- `riflessi` (0-1, partenza dalla finitura: opaca 0.1, satinata 0.35, lucida 0.7):
+  riflessi di lampade, tende e mobili. Un pavimento opaco non riflette quasi nulla.
+- `contatto` (0-1.5, partenza 0.6): ombra a ridosso di mobili, gambe e muri. Alza se il
+  pavimento sembra "staccato" dagli oggetti, abbassa se c'è un alone scuro innaturale.
+- `luce_calda` (0-1, partenza 1): colore della luce della stanza (lampade = calda).
+  Abbassa solo se il pavimento risulta più giallo/arancione del resto della foto.
+- `grana` (0-2, partenza 1): rumore della fotocamera come nel resto della foto.
+
+1. Chiama `proponi_luce` senza argomenti (valori di partenza della finitura).
+2. Apri con Read le immagini restituite: `lavoro/luce_N.jpg` (PRIMA/DOPO) e
+   `lavoro/luce_N_dettagli.jpg` (ingrandimenti dove il pavimento tocca oggetti e mobili).
+3. Se il controllo-luce boccia, correggi i valori secondo i problemi indicati (un passo
+   alla volta, motivando) e riprova.
+Rispondi con un riepilogo breve dell'esito."""
+
 CHECKER_SYSTEM = """Sei "{nome}", un controllore qualità indipendente in un sistema che inserisce \
 pavimenti nelle foto dei clienti. Non hai prodotto tu il lavoro e non devi difenderlo: il tuo
 compito è trovare i difetti prima che arrivino al cliente. Sii severo ma concreto: approva
@@ -110,6 +135,27 @@ scelto dal catalogo.
 `campione.jpg` è la foto del cliente; l'altra immagine mostra l'articolo scelto (campione di
 posa). Approva solo se tipo di materiale, tonalità, venatura/disegno e formato sono
 compatibili. Differenze di luce e prospettiva della foto sono normali."""
+
+CHECK_LIGHT = """Verifica LUCI E OMBRE del nuovo pavimento (non il materiale, non i bordi).
+La prima immagine mostra PRIMA (foto originale) e DOPO; la seconda ingrandisce PRIMA|DOPO
+le zone dove il pavimento incontra oggetti e mobili.
+
+Difetti BLOCCANTI:
+1. ombre mancanti: dove nel PRIMA c'è un'ombra evidente (sotto il tavolo, sotto le sedie,
+   lungo un mobile, in un angolo) il DOPO è uniformemente illuminato;
+2. ombre sbagliate: più scure, più grandi o in posti diversi rispetto al PRIMA, oppure aloni
+   scuri innaturali intorno agli oggetti;
+3. "fantasma" del vecchio pavimento: fughe, disegni o macchie del pavimento vecchio che si
+   intravedono attraverso quello nuovo;
+4. pavimento "incollato": luminosità o colore della luce chiaramente diversi dal resto della
+   stanza (troppo acceso in una foto buia, bianco freddo in una stanza a luce calda, o il
+   contrario);
+5. riflessi incoerenti con la finitura indicata (specchiature su un pavimento opaco).
+
+Difetti MINORI (annotali in `problemi` ma APPROVA): differenze lievi di intensità.
+Il colore e il disegno del materiale sono quelli del catalogo: non giudicarli.
+Se bocci, indica cosa cambiare in termini di: ombre, riflessi, contatto, luce_calda, grana
+(più o meno), e dove guardare (coordinate dei dettagli)."""
 
 CHECK_RENDER = """Revisione finale prima della consegna al cliente.
 L'immagine mostra PRIMA (foto originale) e DOPO (pavimento sostituito).

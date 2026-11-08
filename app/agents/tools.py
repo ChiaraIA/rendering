@@ -19,6 +19,7 @@ from app import config
 from app.agents import prompts
 from app.agents.checkers import CheckerRunner, CheckRequest
 from app.agents.state import (
+    STEPS,
     Attempt,
     JobState,
     MaterialChoice,
@@ -26,6 +27,7 @@ from app.agents.state import (
     Step,
     Verdict,
     can_attempt,
+    light_ok,
     missing_for_delivery,
     missing_for_render,
     next_step,
@@ -36,7 +38,7 @@ from app.core.compositor import CompositeResult
 from app.core.errors import CatalogError, GeometryError
 from app.core.ingest import sha256_bytes
 from app.core.masking import Polygon
-from app.core.models import LayoutStats, MaskOrigin, ValidationReport
+from app.core.models import LayoutStats, LightParams, MaskOrigin, MaterialLayer, ValidationReport
 from app.storage import exporter
 from app.storage.workspace import Workspace
 
@@ -84,6 +86,7 @@ class Toolbox:
             segmenter = _default_segmenter()
         self.segmenter: Segmenter | None = segmenter if callable(segmenter) else None
         self._auto_mask: NDArray[np.uint8] | None = None
+        self._layer: tuple[tuple[str, str, str], MaterialLayer] | None = None
 
     # ------------------------------------------------------------------ supporto
     @property
@@ -157,11 +160,10 @@ class Toolbox:
             ),
             "geometria_approvata": s.geometry is not None,
             "materiale": s.material.material_id if s.material else None,
+            "luce_approvata": s.light.model_dump() if light_ok(s) and s.light else None,
             "posa_approvata": s.render is not None,
             "consegnato": bool(s.delivered),
-            "tentativi": {
-                k: len(s.attempts(k)) for k in ("maschera", "geometria", "materiale", "posa")
-            },
+            "tentativi": {k: len(s.attempts(k)) for k in STEPS},
             "mancano_per_consegna": missing_for_delivery(s),
             "prossimo_passo": next_step(s),
         }
@@ -406,25 +408,103 @@ class Toolbox:
             self.ws.persist()
         return self._reply("materiale", att)
 
+    # ----------------------------------------------------------------------- luce
+    async def proponi_luce(
+        self,
+        ombre: float | None = None,
+        riflessi: float | None = None,
+        contatto: float | None = None,
+        luce_calda: float | None = None,
+        grana: float | None = None,
+        motivazione: str = "",
+    ) -> Result:
+        if block := can_attempt(self.state, "luce"):
+            return {"errore": block}
+        s = self.state
+        if s.mask is None or s.geometry is None or s.material is None:
+            return {"errore": "prima servono maschera, geometria e materiale approvati"}
+        spec = self.catalog.get(s.material.material_id)
+        given = {
+            k: float(v)
+            for k, v in {
+                "ombre": ombre,
+                "riflessi": riflessi,
+                "contatto": contatto,
+                "luce_calda": luce_calda,
+                "grana": grana,
+            }.items()
+            if v is not None
+        }
+        try:
+            params = LightParams(**(lighting.default_params(spec.finish).model_dump() | given))
+        except ValueError as exc:
+            return {"errore": f"parametri di luce non validi: {exc}"}
+        n = len(s.light_attempts) + 1
+        self.ws.log(
+            f"💡 luci: proposta #{n} — ombre {params.ombre:g}, riflessi {params.riflessi:g}, "
+            f"contatto {params.contatto:g}, luce calda {params.luce_calda:g}, "
+            f"grana {params.grana:g}"
+        )
+        result = await asyncio.to_thread(self._composite_sync, params)
+        before = self.ws.preview_of(self.ws.source.pixels)
+        after = self.ws.preview_of(result.pixels)
+        ba = self.ws.write_image(overlays.side_by_side(before, after), f"luce_{n}.jpg")
+        details = self.ws.write_image(
+            overlays.light_details(before, after, self.ws.preview_of(result.alpha)),
+            f"luce_{n}_dettagli.jpg",
+        )
+        verdict = await self._check(
+            CheckRequest(
+                "controllo-luce",
+                prompts.CHECK_LIGHT,
+                [ba, details],
+                f"Materiale: {spec.name}, finitura {spec.finish}. Regolazioni proposte: "
+                f"{params.model_dump()}. Motivazione dell'agente: {motivazione or '-'}",
+            )
+        )
+        sha = sha256_bytes(params.model_dump_json().encode())
+        att = self._record("luce", sha, ba, verdict)
+        if verdict.approved:
+            s.light, s.light_sha256, s.light_material_id = params, sha, spec.id
+            self.ws.persist()
+        return self._reply("luce", att, {"regolazioni": params.model_dump(), "dettagli": details})
+
     # ----------------------------------------------------------------------- posa
-    def _render_sync(self) -> tuple[CompositeResult, ValidationReport, LayoutStats]:
+    def _material_layer(self) -> MaterialLayer:
+        """Il materiale posato non dipende dalla luce: si calcola una volta e si riusa."""
         s, src = self.state, self.ws.source
         assert s.mask and s.geometry and s.material
+        key = (s.mask.mask_sha256, s.geometry_sha256 or "", s.material.material_id)
+        if self._layer is None or self._layer[0] != key:
+            spec = self.catalog.get(s.material.material_id)
+            layer = material.tiled_layer(
+                spec,
+                self.catalog.load_variants(spec),
+                src,
+                s.geometry,
+                self.ws.mask(s.mask.mask_sha256),
+                material.derive_seed(src.meta.normalized_sha256, spec.id),
+                supersampling=config.SUPERSAMPLING,
+            )
+            self._layer = (key, layer)
+        return self._layer[1]
+
+    def _composite_sync(self, params: LightParams) -> CompositeResult:
+        s, src = self.state, self.ws.source
+        assert s.mask and s.geometry
+        mask = self.ws.mask(s.mask.mask_sha256)
+        layer = self._material_layer()
+        ppm = geometry.px_per_mm_map(s.geometry, layer.bbox)
+        light = lighting.scene_light(src, mask, layer.bbox, ppm, params)
+        return compositor.composite(src, mask, s.mask, layer, light)
+
+    def _render_sync(self) -> tuple[CompositeResult, ValidationReport, LayoutStats]:
+        s, src = self.state, self.ws.source
+        assert s.mask and s.geometry and s.material and s.light
         mask = self.ws.mask(s.mask.mask_sha256)
         spec = self.catalog.get(s.material.material_id)
         seed = material.derive_seed(src.meta.normalized_sha256, spec.id)
-        layer = material.tiled_layer(
-            spec,
-            self.catalog.load_variants(spec),
-            src,
-            s.geometry,
-            mask,
-            seed,
-            supersampling=config.SUPERSAMPLING,
-        )
-        ppm = geometry.px_per_mm_map(s.geometry, layer.bbox)
-        light = lighting.combined_light(src, mask, layer.bbox, ppm)
-        result = compositor.composite(src, mask, s.mask, layer, light)
+        result = self._composite_sync(s.light)
         copy = self.ws.root / "originale" / s.image.source_name
         report = validator.validate(src, result, mask, s.mask, copy)
         lo, hi = geometry.px_per_mm_range(s.geometry, mask)
@@ -502,6 +582,7 @@ class Toolbox:
                 mask_sha256=mask_rec.mask_sha256,
                 geometry_sha256=self.state.geometry_sha256 or "",
                 material_id=spec.id,
+                light_sha256=self.state.light_sha256 or "",
                 checks=report.checks,
                 integrity_ok=True,
                 layout=stats,
@@ -566,12 +647,12 @@ class Toolbox:
             else None,
             "misure_stimate": s.room_estimated,
             "posa": s.render.layout.model_dump(mode="json") if s.render else None,
+            "luce": s.light.model_dump(mode="json") if s.light else None,
             "controlli_integrita": [c.model_dump(mode="json") for c in s.render.checks]
             if s.render
             else [],
             "verdetti": {
-                step: [a.model_dump(mode="json") for a in s.attempts(step)]
-                for step in ("maschera", "geometria", "materiale", "posa")
+                step: [a.model_dump(mode="json") for a in s.attempts(step)] for step in STEPS
             },
             "sha256_risultato": s.render.final_sha256 if s.render else None,
             "costo_controllori_usd": round(s.cost_usd, 4),
@@ -665,6 +746,38 @@ class Toolbox:
         async def t_materiale(args: dict[str, Any]) -> dict[str, Any]:
             return wrap(await self.scegli_materiale(args["codice"], args.get("motivazione", "")))
 
+        @tool(
+            "proponi_luce",
+            "Regola luci e ombre del nuovo pavimento e le fa giudicare dal controllo-luce. "
+            "Senza argomenti usa i valori di partenza della finitura del materiale. "
+            "ombre 0-1.5 (ombre della foto: tavoli, sedie, mobili), riflessi 0-1 (riflessi di "
+            "luci e mobili), contatto 0-1.5 (ombra a ridosso di mobili e muri), luce_calda 0-1 "
+            "(colore della luce della stanza), grana 0-2 (rumore della fotocamera).",
+            {
+                "type": "object",
+                "properties": {
+                    "ombre": {"type": "number", "minimum": 0, "maximum": 1.5},
+                    "riflessi": {"type": "number", "minimum": 0, "maximum": 1},
+                    "contatto": {"type": "number", "minimum": 0, "maximum": 1.5},
+                    "luce_calda": {"type": "number", "minimum": 0, "maximum": 1},
+                    "grana": {"type": "number", "minimum": 0, "maximum": 2},
+                    "motivazione": {"type": "string"},
+                },
+            },
+        )
+        async def t_luce(args: dict[str, Any]) -> dict[str, Any]:
+            self._trace("proponi_luce", args)
+            return wrap(
+                await self.proponi_luce(
+                    args.get("ombre"),
+                    args.get("riflessi"),
+                    args.get("contatto"),
+                    args.get("luce_calda"),
+                    args.get("grana"),
+                    str(args.get("motivazione", "")),
+                )
+            )
+
         @tool("esegui_posa", "Render deterministico + controllo integrità + revisione finale.", {})
         async def t_posa(args: dict[str, Any]) -> dict[str, Any]:
             return wrap(await self.esegui_posa())
@@ -690,6 +803,7 @@ class Toolbox:
                 t_geometria,
                 t_catalogo,
                 t_materiale,
+                t_luce,
                 t_posa,
                 t_consegna,
                 t_operatore,

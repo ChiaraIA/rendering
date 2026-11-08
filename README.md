@@ -6,20 +6,22 @@ pavimento posato in prospettiva. **La foto originale non viene mai toccata fuori
 pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
 
 ```
-                         ┌──────────────── ORCHESTRATORE (Claude) ────────────────┐
- foto + richiesta ──►    │ pianifica · delega · ripete con il feedback · escalation│
-                         └───┬───────────────┬───────────────┬──────────────┬─────┘
-                             ▼               ▼               ▼              ▼
-                        «pavimento»      «geometra»      «materiali»    esegui_posa
-                        maschera del     4 angoli della  codice o       render deterministico
-                        pavimento        stanza + misure campione       con la texture vera
-                             │               │               │              │
-                             ▼               ▼               ▼              ▼
-                     controllo-maschera controllo-geometria controllo-  controllo-integrità (codice)
-                     (Claude, sessione  (Claude + verifica  materiale   + revisore-finale (Claude)
-                      separata)          focale EXIF)                       │
-                                                                            ▼
-                                     CANCELLI NEL CODICE ───────────► consegna
+                      ┌──────────────────── ORCHESTRATORE (Claude) ─────────────────────┐
+ foto + richiesta ──► │   pianifica · delega · ripete con il feedback · escalation       │
+                      └───┬────────────┬────────────┬────────────┬────────────┬─────────┘
+                          ▼            ▼            ▼            ▼            ▼
+                     «pavimento»  «geometra»   «materiali»    «luci»      esegui_posa
+                     maschera     4 angoli +   codice o      ombre,       render con texture
+                     del          misure       campione      riflessi,    del catalogo e
+                     pavimento                               luce calda   luci approvate
+                          │            │            │            │            │
+                          ▼            ▼            ▼            ▼            ▼
+                     controllo-   controllo-   controllo-   controllo-   controllo-integrità
+                     maschera     geometria    materiale    luce         (codice) + revisore-
+                                  (+ focale                              finale (Claude)
+                                   EXIF)                                      │
+                                                                              ▼
+                                     CANCELLI NEL CODICE ─────────────► consegna
 ```
 
 ## Perché ci si può fidare del risultato
@@ -131,6 +133,26 @@ disattivare la segmentazione: `POSA_SEGMENTAZIONE=0`.
 Per usare un modello più economico per gli agenti: `posa web --modello sonnet`. Costa circa
 la metà, ma nelle prove è meno affidabile sulla geometria della stanza.
 
+## Luci e ombre (agente «luci»)
+
+Un pavimento giusto ma illuminato "a caso" sembra incollato. Per questo luci e ombre sono un
+passo a sé, con un proprio agente e un proprio controllore. Il codice ricava la luce dal
+**vecchio pavimento della foto**, dopo averne cancellato il disegno (fughe, venature):
+
+- **luce d'ambiente**: zone più illuminate e più buie della stanza;
+- **ombre**: sotto il tavolo, le sedie, lungo i mobili, come nella foto;
+- **riflessi** di lampade, tende e mobili, dosati secondo la **finitura** del materiale
+  (opaca, satinata, lucida);
+- **ombra di contatto** a ridosso di ciò che poggia a terra e dei muri;
+- **colore della luce** (stimato dalle superfici bianche della foto: lampade = luce calda)
+  e **grana** della fotocamera.
+
+L'agente «luci» decide quanto pesa ciascuna parte (`ombre`, `riflessi`, `contatto`,
+`luce_calda`, `grana`); il **controllo-luce** confronta PRIMA e DOPO, anche con ingrandimenti
+dove il pavimento tocca gli oggetti, e boccia ombre mancanti o esagerate, "fantasmi" del
+vecchio pavimento, riflessi incoerenti con la finitura o un pavimento più acceso della
+stanza. `esegui_posa` parte solo con luci approvate.
+
 ## Mettere i vostri rivestimenti nel catalogo
 
 Per ogni articolo servono le foto di **una singola piastrella o doga**: frontale, ritagliata
@@ -143,8 +165,9 @@ posa aggiungi-materiale foto1.jpg foto2.jpg foto3.jpg --codice gres-antracite-60
 posa aggiungi-materiale doga1.jpg doga2.jpg --codice rovere-naturale-120x20 --nome "Rovere naturale" --formato 120x20 --posa running_bond --sfalsamento 0.33
 ```
 
-Fughe, schema (`grid` o `running_bond`) e rotazione (`--rotazione 45` per la diagonale) sono
-**fissati dal materiale**: il cliente sceglie solo l'articolo. I materiali di esempio nella
+Fughe, schema (`grid` o `running_bond`), rotazione (`--rotazione 45` per la diagonale) e
+finitura (`--finitura opaca|satinata|lucida`, decide i riflessi) sono **fissati dal
+materiale**: il cliente sceglie solo l'articolo. I materiali di esempio nella
 repo sono texture sintetiche, generate via codice.
 
 ## Cosa aspettarsi

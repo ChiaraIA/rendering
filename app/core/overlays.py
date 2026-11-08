@@ -257,3 +257,45 @@ def boundary_details(
         r, c = divmod(k, cols)
         sheet[r * (th + 8) : r * (th + 8) + th, c * (tw + 8) : c * (tw + 8) + tw] = t
     return sheet
+
+
+def light_details(
+    before: Arr, after: Arr, mask: NDArray[np.uint8], n: int = 3, crop: tuple[int, int] = (280, 180)
+) -> Arr:
+    """PRIMA | DOPO ingranditi dove il pavimento incontra oggetti e mobili (ombre, contatti).
+
+    Le zone scelte sono quelle con più bordo pavimento-oggetto: lì si vede subito se le ombre
+    sotto tavoli, sedie e mobili sono rimaste, sparite o esagerate.
+    """
+    h, w = mask.shape
+    cw, ch = min(crop[0], w), min(crop[1], h)
+    m = mask >= 128
+    edge = (m ^ _erode(m)).astype(np.float32)
+    edge[:3], edge[-3:], edge[:, :3], edge[:, -3:] = 0, 0, 0, 0
+    density = cv2.boxFilter(edge, -1, (cw, ch), normalize=False, borderType=cv2.BORDER_CONSTANT)
+    rows: list[Arr] = []
+    for _ in range(n):
+        y, x = np.unravel_index(int(np.argmax(density)), density.shape)
+        if density[y, x] <= 0:
+            break
+        x0 = int(np.clip(x - cw // 2, 0, w - cw))
+        y0 = int(np.clip(y - ch // 2, 0, h - ch))
+        pair = side_by_side(
+            before[y0 : y0 + ch, x0 : x0 + cw],
+            after[y0 : y0 + ch, x0 : x0 + cw],
+            (f"PRIMA (x {x0}, y {y0})", "DOPO"),
+        )
+        im = Image.fromarray(pair).resize(
+            (pair.shape[1] * 2, pair.shape[0] * 2), Image.Resampling.LANCZOS
+        )
+        rows.append(np.asarray(im, dtype=np.uint8))
+        density[max(0, y - ch) : y + ch, max(0, x - cw) : x + cw] = 0
+    if not rows:
+        return side_by_side(before, after)
+    width = max(r.shape[1] for r in rows)
+    sheet = np.full((sum(r.shape[0] for r in rows) + 8 * (len(rows) - 1), width, 3), 255, np.uint8)
+    y = 0
+    for r in rows:
+        sheet[y : y + r.shape[0], : r.shape[1]] = r
+        y += r.shape[0] + 8
+    return sheet

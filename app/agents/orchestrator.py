@@ -63,6 +63,12 @@ def _subagents(model: str) -> dict[str, Any]:
             tools=t("catalogo", "scegli_materiale", "stato_pratica"),
             model=model,
         ),
+        "luci": AgentDefinition(
+            description="Regola luci, ombre e riflessi del nuovo pavimento perché sia naturale.",
+            prompt=prompts.LIGHT_AGENT,
+            tools=t("proponi_luce", "stato_pratica"),
+            model=model,
+        ),
     }
 
 
@@ -105,6 +111,7 @@ async def run_job(
         "proponi_geometria",
         "catalogo",
         "scegli_materiale",
+        "proponi_luce",
         "esegui_posa",
         "consegna",
         "richiedi_operatore",

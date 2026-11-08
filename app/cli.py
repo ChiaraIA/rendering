@@ -216,6 +216,13 @@ def aggiungi_materiale(
             "oppure 'no'. Serve a uniformare foto scattate con luce diversa",
         ),
     ] = None,
+    finitura: Annotated[
+        str,
+        typer.Option(
+            "--finitura",
+            help="Finitura della superficie: opaca, satinata o lucida (decide i riflessi)",
+        ),
+    ] = "opaca",
     mantieni_luce: Annotated[
         bool,
         typer.Option(
@@ -299,6 +306,7 @@ def aggiungi_materiale(
         "variants": variants,
         "variant_rotations": default_rot,
         "texture_color_space": "srgb",
+        "finish": finitura,
     }
     MaterialSpec.model_validate(entry)  # errore chiaro prima di toccare il catalogo
     doc = json.loads(path.read_text())

@@ -123,6 +123,10 @@ def composite(
                 light.gain[y0 - gy0 : y1 - gy0, x0 - gx0 : x1 - gx0][idx], dtype=np.float64
             )
             lin_m = lin_m * gain[:, None] * np.asarray(light.tint, dtype=np.float64)
+            if light.add is not None:
+                lin_m = lin_m + np.asarray(
+                    light.add[y0 - gy0 : y1 - gy0, x0 - gx0 : x1 - gx0][idx], dtype=np.float64
+                )
 
         trc = trc_for(source.meta.color_space)
         rgb_view = final[y0:y1, x0:x1, :3]

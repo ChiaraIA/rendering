@@ -36,7 +36,8 @@
         180,
         270
       ],
-      "texture_color_space": "srgb"
+      "texture_color_space": "srgb",
+      "finish": "opaca"
     },
     {
       "id": "laminato-rovere-120x20",
@@ -68,7 +69,8 @@
         0,
         180
       ],
-      "texture_color_space": "srgb"
+      "texture_color_space": "srgb",
+      "finish": "satinata"
     },
     {
       "id": "marmo-bianco-60x60",
@@ -102,7 +104,8 @@
         180,
         270
       ],
-      "texture_color_space": "srgb"
+      "texture_color_space": "srgb",
+      "finish": "lucida"
     },
     {
       "id": "ceramica-blu-20x20",
@@ -129,7 +132,8 @@
         180,
         270
       ],
-      "texture_color_space": "srgb"
+      "texture_color_space": "srgb",
+      "finish": "satinata"
     },
     {
       "id": "esagona-mix-beige-25",
@@ -233,7 +237,8 @@
         240,
         300
       ],
-      "texture_color_space": "srgb"
+      "texture_color_space": "srgb",
+      "finish": "opaca"
     }
   ]
 }

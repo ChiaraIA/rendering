@@ -197,6 +197,7 @@ def _work_gallery(ws: Any) -> list[tuple[str, str]]:
         "geometria": "prospettiva",
         "prima_dopo": "prima/dopo",
         "materiale": "materiale",
+        "luce": "luci e ombre",
     }
     out = []
     for p in sorted((ws.root / "lavoro").glob("*.jpg"), key=lambda q: q.stat().st_mtime):

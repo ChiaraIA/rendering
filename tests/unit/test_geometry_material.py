@@ -8,7 +8,7 @@ import pytest
 from app.catalog.loader import Catalog
 from app.core import geometry, ingest, lighting, masking, material, overlays
 from app.core.errors import GeometryError
-from app.core.models import TILE_NONE
+from app.core.models import TILE_NONE, LightParams
 from app.devtools import synthetic
 
 S = synthetic.make_room_scene(width=640, height=480)
@@ -214,3 +214,43 @@ def test_far_joints_are_continuous_lines_not_dashes() -> None:
     # impronta minuscola: torna il test dentro/fuori
     sharp = lay.joint_fraction(s, t, np.full_like(s, 1e-4), np.full_like(s, 1e-4))
     assert np.count_nonzero((sharp > 1e-3) & (sharp < 1 - 1e-3)) <= 2  # solo sul bordo esatto
+
+
+def _old_floor(h: int = 240, w: int = 320) -> np.ndarray:
+    """Vecchio pavimento uniforme con fughe sottili, un'ombra sotto un 'tavolo' e un riflesso."""
+    img = np.full((h, w, 3), 180, np.uint8)
+    img[::30, :] = 120  # fughe orizzontali (1 px)
+    img[:, ::30] = 120  # fughe verticali
+    yy, xx = np.mgrid[0:h, 0:w]
+    shadow = np.exp(-(((xx - 220) / 30.0) ** 2 + ((yy - 140) / 22.0) ** 2))
+    img = (img * (1 - 0.6 * shadow[..., None])).astype(np.uint8)
+    streak = (np.abs(xx - 70) < 6) & (yy > 60) & (yy < 200)  # riflesso di una tenda
+    img[streak] = np.minimum(255, img[streak].astype(int) + 60).astype(np.uint8)
+    return img
+
+
+def test_photo_shading_keeps_shadows_and_reflections_not_the_old_joints() -> None:
+    img = _old_floor()
+    src = ingest.from_array(img)
+    mask = np.full(img.shape[:2], 255, np.uint8)
+    bbox = (0, 0, img.shape[1], img.shape[0])
+    ratio, excess = lighting.photo_shading(src, mask, bbox, 0.3)
+    assert ratio[140, 220] < 0.6  # l'ombra resta
+    open_floor = ratio[30:50, 120:170]  # zona libera con fughe
+    assert open_floor.std() < 0.03  # le vecchie fughe non passano
+    assert abs(float(np.median(open_floor)) - 1.0) < 0.12
+    assert excess[130, 70].sum() > 0.02 and excess[130, 150].sum() < 0.005  # riflesso
+
+
+def test_scene_light_parameters() -> None:
+    img = _old_floor()
+    src = ingest.from_array(img)
+    mask = np.full(img.shape[:2], 255, np.uint8)
+    bbox = (0, 0, img.shape[1], img.shape[0])
+    none = lighting.scene_light(
+        src, mask, bbox, 0.3, LightParams(ombre=0, riflessi=0, contatto=0, grana=0)
+    )
+    full = lighting.scene_light(src, mask, bbox, 0.3, LightParams(ombre=1.0, riflessi=0.7))
+    assert full.gain[140, 220] < none.gain[140, 220] * 0.8  # ombre più marcate
+    assert none.add is None and full.add is not None and full.add[130, 70].sum() > 0
+    assert lighting.default_params("lucida").riflessi > lighting.default_params("opaca").riflessi
