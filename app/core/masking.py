@@ -89,6 +89,10 @@ def refine(
     return readonly(np.clip(np.rint(soft), 0, 255).astype(np.uint8))
 
 
+def readonly_mask(mask: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    return readonly(np.ascontiguousarray(mask, dtype=np.uint8))
+
+
 def load_mask_file(path: Path, expected_hw: tuple[int, int]) -> NDArray[np.uint8]:
     """Legge una maschera da file. Rifiuta tutto ciò che è ambiguo invece di indovinare."""
     try:

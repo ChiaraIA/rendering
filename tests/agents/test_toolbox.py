@@ -258,3 +258,47 @@ def test_next_step_follows_the_procedure(tmp_path: Path, photo: Path, catalog: C
     assert st.next_step(ws.state).startswith("completato")
     status = _run(tb.stato_pratica())
     assert status["consegnato"] and status["mancano_per_consegna"] == []
+
+
+def test_automatic_mask_with_agent_corrections(
+    tmp_path: Path, photo: Path, catalog: Catalog
+) -> None:
+    """base="automatica": parte dal segmentatore; area/escludi/pavimento la correggono."""
+    calls = {"n": 0}
+
+    def fake_segmenter(img: np.ndarray) -> np.ndarray:
+        calls["n"] += 1
+        return SCENE.floor_mask.copy()  # come un modello perfetto
+
+    ws = _ws(tmp_path, photo)
+    checker = ScriptedChecker()
+    tb = Toolbox(ws, catalog, checker, segmenter=fake_segmenter)
+    r = _run(tb.proponi_maschera(base="automatica"))
+    assert r["esito"] == "APPROVATO" and "dettagli" in r
+    assert (ws.root / r["dettagli"]).is_file()
+    assert checker.seen[-1].images[-1] == r["dettagli"]  # il controllore vede gli ingrandimenti
+    assert ws.state.mask is not None and ws.state.mask.origin.value == "semantic"
+    auto = ws.mask(ws.state.mask.mask_sha256)
+    assert np.array_equal(auto >= 128, SCENE.floor_mask >= 128)
+
+    # correzioni: togli un rettangolo, poi limita a metà sinistra
+    ws2 = _ws(tmp_path / "b", photo)
+    tb2 = Toolbox(ws2, catalog, ScriptedChecker(), segmenter=fake_segmenter)
+    hole = [[[300, 400], [380, 400], [380, 460], [300, 460]]]
+    left = [[[0, 0], [320, 0], [320, 480], [0, 480]]]
+    _run(tb2.proponi_maschera(base="automatica", escludi=hole, area=left))
+    m = ws2.mask(ws2.state.mask.mask_sha256)  # type: ignore[union-attr]
+    assert m[430, 340] == 0  # dentro il buco escluso
+    assert m[470, 500] == 0  # fuori dall'area
+    assert m[470, 100] == 255  # pavimento tenuto
+    assert calls["n"] == 2  # una segmentazione per pratica
+
+
+def test_without_segmenter_falls_back_to_polygons(
+    tmp_path: Path, photo: Path, catalog: Catalog
+) -> None:
+    tb = Toolbox(_ws(tmp_path, photo), catalog, ScriptedChecker(), segmenter=None)
+    assert "poligono" in _run(tb.proponi_maschera(base="automatica"))["errore"]
+    floor, excl = _floor_mask_polys()
+    r = _run(tb.proponi_maschera(floor, excl, base="automatica"))
+    assert r["esito"] == "APPROVATO" and "non disponibile" in r["nota"]

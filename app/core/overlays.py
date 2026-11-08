@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import TypeAlias
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
@@ -212,3 +213,47 @@ def tile_patch(
             y, x = j + r_ * (h + j), j + c * (w + j)
             out[y : y + h, x : x + w] = texture[..., :3]
     return out
+
+
+def boundary_details(
+    img: Arr, mask: NDArray[np.uint8], n: int = 4, crop: tuple[int, int] = (300, 220), zoom: int = 2
+) -> Arr:
+    """Tavola con gli ingrandimenti delle zone dove il bordo della maschera è più complicato
+    (gambe di sedie e tavoli, piedi dei mobili, angoli): lì si vedono gli errori di contorno."""
+    h, w = mask.shape
+    cw, ch = min(crop[0], w), min(crop[1], h)
+    m = mask >= 128
+    edge = (m ^ _erode(m)).astype(np.float32)
+    edge[:3], edge[-3:], edge[:, :3], edge[:, -3:] = 0, 0, 0, 0  # il bordo della foto non conta
+    density = cv2.boxFilter(edge, -1, (cw, ch), normalize=False, borderType=cv2.BORDER_CONSTANT)
+    over = mask_overlay(img, mask)
+    tiles: list[Arr] = []
+    for _ in range(n):
+        y, x = np.unravel_index(int(np.argmax(density)), density.shape)
+        if density[y, x] <= 0:
+            break
+        x0 = int(np.clip(x - cw // 2, 0, w - cw))
+        y0 = int(np.clip(y - ch // 2, 0, h - ch))
+        tile = Image.fromarray(np.ascontiguousarray(over[y0 : y0 + ch, x0 : x0 + cw]))
+        tile = tile.resize((cw * zoom, ch * zoom), Image.Resampling.LANCZOS)
+        d = ImageDraw.Draw(tile)
+        d.text(
+            (8, 6),
+            f"dettaglio {len(tiles) + 1}  (x {x0}-{x0 + cw}, y {y0}-{y0 + ch})",
+            fill=(255, 255, 255),
+            font=_font(18),
+            stroke_width=3,
+            stroke_fill=(0, 0, 0),
+        )
+        tiles.append(np.asarray(tile, dtype=np.uint8))
+        density[max(0, y - ch) : y + ch, max(0, x - cw) : x + cw] = 0  # niente sovrapposizioni
+    if not tiles:
+        return over
+    cols = 2 if len(tiles) > 1 else 1
+    rows = (len(tiles) + cols - 1) // cols
+    th, tw = tiles[0].shape[:2]
+    sheet = np.full((rows * th + (rows - 1) * 8, cols * tw + (cols - 1) * 8, 3), 255, np.uint8)
+    for k, t in enumerate(tiles):
+        r, c = divmod(k, cols)
+        sheet[r * (th + 8) : r * (th + 8) + th, c * (tw + 8) : c * (tw + 8) + tw] = t
+    return sheet

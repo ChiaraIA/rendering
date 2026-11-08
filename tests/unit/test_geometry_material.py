@@ -168,3 +168,15 @@ def test_preview_of_masks_keeps_geometry() -> None:
     p, s = overlays.resize_to_width(m, 1280)
     assert p.shape == (960, 1280) and s == 0.8
     assert p[700, 100] == 0 and p[700, 1000] == 255
+
+
+def test_boundary_details_focus_on_objects() -> None:
+    img = np.full((480, 640, 3), 200, np.uint8)
+    mask = np.zeros((480, 640), np.uint8)
+    mask[240:, :] = 255  # pavimento fino al bordo della foto
+    for x in range(300, 340, 8):  # "gambe di sedia": strisce sottili fuori dalla maschera
+        mask[300:420, x : x + 3] = 0
+    sheet = overlays.boundary_details(img, mask, n=2, crop=(200, 150))
+    assert sheet.shape[2] == 3 and sheet.shape[0] >= 300  # almeno un dettaglio ingrandito 2x
+    empty = overlays.boundary_details(img, np.zeros((480, 640), np.uint8))
+    assert empty.shape == img.shape  # nessun bordo: restituisce l'overlay intero

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from app import config
 from app.agents import prompts
@@ -39,6 +41,20 @@ from app.storage import exporter
 from app.storage.workspace import Workspace
 
 Result = dict[str, Any]
+Segmenter = Callable[[NDArray[np.uint8]], NDArray[np.uint8]]
+
+
+def _default_segmenter() -> Segmenter | None:
+    """Modello di segmentazione se installato (PyTorch + transformers), altrimenti None."""
+    import os
+
+    from app.adapters import semantic
+
+    if os.environ.get("POSA_SEGMENTAZIONE", "1") == "0" or not semantic.available():
+        return None
+    return lambda img: semantic.surface_mask(img, "pavimento")
+
+
 MAX_ATTEMPTS = config.MAX_ATTEMPTS
 
 
@@ -52,12 +68,22 @@ def _polys(raw: Any) -> list[Polygon]:
 
 
 class Toolbox:
-    def __init__(self, ws: Workspace, catalog: Catalog, checker: CheckerRunner) -> None:
+    def __init__(
+        self,
+        ws: Workspace,
+        catalog: Catalog,
+        checker: CheckerRunner,
+        segmenter: Segmenter | None | str = "auto",
+    ) -> None:
         self.ws = ws
         self.catalog = catalog
         self.checker = checker
         self._result: CompositeResult | None = None
         self._validation: ValidationReport | None = None
+        if segmenter == "auto":
+            segmenter = _default_segmenter()
+        self.segmenter: Segmenter | None = segmenter if callable(segmenter) else None
+        self._auto_mask: NDArray[np.uint8] | None = None
 
     # ------------------------------------------------------------------ supporto
     @property
@@ -141,43 +167,86 @@ class Toolbox:
         }
 
     # ------------------------------------------------------------------ maschera
+    async def _automatic_mask(self) -> NDArray[np.uint8] | None:
+        """Maschera del pavimento dal modello di segmentazione (calcolata una volta)."""
+        if self.segmenter is None:
+            return None
+        if self._auto_mask is None:
+            self.ws.log("🧠 segmentazione automatica del pavimento…")
+            self._auto_mask = await asyncio.to_thread(self.segmenter, self.ws.source.pixels)
+        return self._auto_mask
+
     async def proponi_maschera(
-        self, pavimento: Any, escludi: Any = None, rifinisci: bool = True
+        self,
+        pavimento: Any = None,
+        escludi: Any = None,
+        rifinisci: bool = True,
+        base: str = "automatica",
+        area: Any = None,
     ) -> Result:
+        """`base="automatica"`: parte dal modello di segmentazione; `area` la limita a una
+        zona, `pavimento` aggiunge zone, `escludi` ne toglie. `base="poligoni"`: solo poligoni."""
         if block := can_attempt(self.state, "maschera"):
             return {"errore": block}
+        src = self.ws.source
         include = [self.ws.to_full(p) for p in _polys(pavimento)]
         exclude = [self.ws.to_full(p) for p in _polys(escludi)]
-        if not include:
-            return {"errore": "serve almeno un poligono 'pavimento' con 3 o più punti"}
-        src = self.ws.source
-        coarse = masking.rasterize(src.shape_hw, include, exclude)
-        mask = await asyncio.to_thread(masking.refine, src.pixels, coarse) if rifinisci else coarse
-        area = float(np.count_nonzero(mask >= 128)) / mask.size
-        if area < 0.01:
-            return self._code_reject("maschera", f"maschera quasi vuota ({area:.1%} della foto)")
+        limit = [self.ws.to_full(p) for p in _polys(area)]
+        auto = await self._automatic_mask() if base == "automatica" else None
+        note = ""
+        if base == "automatica" and auto is None:
+            note = "segmentazione automatica non disponibile: uso solo i poligoni"
+        if auto is not None:
+            mask = auto.copy()
+            if limit:
+                mask = np.minimum(mask, masking.rasterize(src.shape_hw, limit))
+            if include:
+                mask = np.maximum(mask, masking.rasterize(src.shape_hw, include))
+            if exclude:
+                mask = np.minimum(mask, 255 - masking.rasterize(src.shape_hw, exclude))
+            mask = masking.readonly_mask(mask)
+            origin = MaskOrigin.SEMANTIC
+        else:
+            if not include:
+                return {"errore": "serve almeno un poligono 'pavimento' con 3 o più punti"}
+            coarse = masking.rasterize(src.shape_hw, include, exclude)
+            mask = (
+                await asyncio.to_thread(masking.refine, src.pixels, coarse) if rifinisci else coarse
+            )
+            origin = MaskOrigin.REFINED if rifinisci else MaskOrigin.POLYGON
+        area_frac = float(np.count_nonzero(mask >= 128)) / mask.size
+        if area_frac < 0.01:
+            return self._code_reject(
+                "maschera", f"maschera quasi vuota ({area_frac:.1%} della foto)"
+            )
         sha = self.ws.keep_mask(mask)
         n = len(self.state.mask_attempts) + 1
+        prev_img, prev_mask = self.ws.preview_of(src.pixels), self.ws.preview_of(mask)
         overlay = self.ws.write_image(
-            overlays.mask_overlay(self.ws.preview_of(src.pixels), self.ws.preview_of(mask)),
-            f"maschera_{n}.jpg",
+            overlays.mask_overlay(prev_img, prev_mask), f"maschera_{n}.jpg"
         )
-        self.ws.log(f"🟦 pavimento: maschera #{n} proposta ({area:.0%} della foto)")
+        details = self.ws.write_image(
+            overlays.boundary_details(prev_img, prev_mask), f"maschera_{n}_dettagli.jpg"
+        )
+        how = "automatica" if origin is MaskOrigin.SEMANTIC else "da poligoni"
+        self.ws.log(f"🟦 pavimento: maschera #{n} {how} ({area_frac:.0%} della foto)")
         verdict = await self._check(
             CheckRequest(
                 "controllo-maschera",
                 prompts.CHECK_MASK,
-                ["preview.jpg", overlay],
-                f"Dati: la maschera copre il {area:.1%} della foto.",
+                ["preview.jpg", overlay, details],
+                f"Dati: la maschera copre il {area_frac:.1%} della foto.",
             )
         )
         att = self._record("maschera", sha, overlay, verdict)
         if verdict.approved:
-            origin = MaskOrigin.REFINED if rifinisci else MaskOrigin.POLYGON
             rec = masking.make_record(mask, src.meta.normalized_sha256, origin)
             self.state.mask = masking.approve(rec, mask, verdict.checker)
             self.ws.persist()
-        return self._reply("maschera", att)
+        extra: Result = {"dettagli": details}
+        if note:
+            extra["nota"] = note
+        return self._reply("maschera", att, extra)
 
     # ----------------------------------------------------------------- geometria
     async def proponi_geometria(
@@ -530,23 +599,31 @@ class Toolbox:
 
         @tool(
             "proponi_maschera",
-            "Propone la maschera del pavimento (coordinate in pixel di preview_griglia.jpg) e la "
-            "fa giudicare a un controllore indipendente.",
+            "Propone la maschera del pavimento e la fa giudicare a un controllore indipendente. "
+            "base='automatica' (consigliato): parte dal modello di segmentazione; 'area' limita "
+            "il risultato a una zona, 'pavimento' aggiunge zone, 'escludi' toglie zone (tappeti, "
+            "oggetti). base='poligoni': solo i poligoni 'pavimento'/'escludi'. Coordinate in "
+            "pixel di preview_griglia.jpg.",
             {
                 "type": "object",
                 "properties": {
+                    "base": {"type": "string", "enum": ["automatica", "poligoni"]},
+                    "area": {"type": "array", "items": poly},
                     "pavimento": {"type": "array", "items": poly},
                     "escludi": {"type": "array", "items": poly},
                     "rifinisci": {"type": "boolean"},
                 },
-                "required": ["pavimento"],
             },
         )
         async def t_maschera(args: dict[str, Any]) -> dict[str, Any]:
             self._trace("proponi_maschera", args)
             return wrap(
                 await self.proponi_maschera(
-                    args.get("pavimento"), args.get("escludi"), bool(args.get("rifinisci", True))
+                    args.get("pavimento"),
+                    args.get("escludi"),
+                    bool(args.get("rifinisci", True)),
+                    str(args.get("base", "automatica")),
+                    args.get("area"),
                 )
             )
 

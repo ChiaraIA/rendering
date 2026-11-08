@@ -67,15 +67,21 @@ def verifica(
     online: Annotated[
         bool, typer.Option("--online", help="Fa anche una chiamata di prova agli agenti (~0,1 USD)")
     ] = False,
+    modelli: Annotated[
+        bool,
+        typer.Option("--modelli", help="Scarica e prova il modello di segmentazione (~230 MB)"),
+    ] = False,
     modello: ModelOpt = None,
 ) -> None:
     """Controlla l'installazione e dice come risolvere ciò che manca."""
     from app import config
-    from app.diagnostics import offline_checks, online_check
+    from app.diagnostics import model_check, offline_checks, online_check
 
     _set_model(modello)
 
     checks = offline_checks()
+    if modelli:
+        checks.append(model_check())
     if online:
         checks.append(asyncio.run(online_check(config.AGENT_MODEL)))
     icon = {"ok": "✅", "avviso": "⚠️ ", "errore": "❌"}

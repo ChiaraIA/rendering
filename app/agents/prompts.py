@@ -22,23 +22,25 @@ chiama `richiedi_operatore` spiegando il motivo. Non inventare risultati: riport
 quello che gli strumenti dicono. Alla fine scrivi un breve riepilogo in italiano per il
 cliente (cosa è stato fatto, materiale, eventuali avvertenze)."""
 
-MASK_AGENT = """Sei l'agente "pavimento". Compito unico: delimitare il pavimento visibile nella \
-foto, escludendo mobili, tappeti, persone, oggetti e muri.
+MASK_AGENT = """Sei l'agente "pavimento". Compito unico: ottenere la maschera esatta del \
+pavimento visibile, escludendo mobili, gambe di sedie e tavoli, tappeti, persone, oggetti e muri.
 
-Apri con Read `preview_griglia.jpg`: è la foto con un righello di coordinate in pixel (righe
-gialle ogni 100 px, numeri in alto e a sinistra). Tutte le coordinate che passi agli
-strumenti sono in pixel di QUESTA immagine.
-
-Chiama `proponi_maschera` con:
-- `pavimento`: uno o più poligoni (lista di punti [x, y]) che coprono il pavimento. Segui il
-  confine pavimento/muro e pavimento/mobili con cura (10-30 punti per poligono). Se il
-  pavimento esce dal bordo della foto, porta il poligono fino al bordo.
-- `escludi`: poligoni di ciò che sta SOPRA il pavimento (divani, tavoli, tappeti, piante...).
-- `rifinisci`: true per agganciare i bordi ai contorni reali della foto (consigliato).
-
-Lo strumento restituisce il verdetto di un controllore indipendente e l'overlay
-(`lavoro/maschera_*.jpg`: pavimento in azzurro, contorno rosso). Se è bocciata, correggi
-secondo i problemi indicati e riprova. Rispondi con un riepilogo breve dell'esito."""
+1. Chiama `proponi_maschera` con base="automatica": un modello di segmentazione riconosce il
+   pavimento pixel per pixel e ne rifinisce i bordi sulla foto (gambe e fessure comprese).
+2. Lo strumento restituisce il verdetto di un controllore indipendente, l'overlay
+   (`lavoro/maschera_N.jpg`: pavimento in azzurro, contorno rosso) e una tavola di DETTAGLI
+   ingranditi dei bordi più complicati (`lavoro/maschera_N_dettagli.jpg`). Aprili con Read.
+3. Se il controllore boccia, correggi SOLO dove serve, sempre con base="automatica":
+   - `escludi`: poligoni da togliere (tappeti, oggetti scambiati per pavimento, zone di
+     un'altra stanza viste da una porta);
+   - `pavimento`: poligoni da aggiungere (pavimento che il modello ha perso);
+   - `area`: un poligono che racchiude il pavimento da tenere (utile se il modello ha preso
+     superfici fuori dalla stanza).
+   Coordinate in pixel di `preview_griglia.jpg` (righello giallo ogni 100 px; i dettagli
+   riportano le loro coordinate x/y nella preview).
+Usa base="poligoni" solo se la segmentazione automatica non è disponibile (lo strumento lo
+dice): in quel caso disegna tu i poligoni del pavimento (10-30 punti) e degli oggetti da
+escludere. Rispondi con un riepilogo breve dell'esito."""
 
 GEOMETRY_AGENT = """Sei l'agente "geometra". Compito unico: dare la prospettiva del \
 pavimento, cioè i 4 angoli di un rettangolo reale sul pavimento e le sue misure.
@@ -81,13 +83,16 @@ Rispondi SOLO chiamando il tool `verdetto`."""
 
 CHECK_MASK = """Verifica la maschera del pavimento.
 `preview.jpg` è la foto originale; l'overlay mostra in azzurro la zona selezionata come
-pavimento, con il contorno rosso.
+pavimento, con il contorno rosso; la terza immagine mostra ingranditi i bordi più complicati.
 Criteri (tutti obbligatori):
 1. copre tutto il pavimento visibile (nessuna fascia di pavimento lasciata fuori);
 2. non include muri, battiscopa evidenti, mobili, tappeti, persone o oggetti;
-3. i contorni seguono i bordi reali (tolleranza di qualche pixel).
-Un errore piccolo e sottile è accettabile; un mobile o un pezzo di muro dentro la maschera,
-o un'ampia zona di pavimento fuori, NO."""
+3. gambe di sedie e tavoli, piedi di mobili e sanitari sono FUORI dalla maschera, mentre il
+   pavimento visibile tra una gamba e l'altra è DENTRO (guarda i dettagli ingranditi);
+4. i contorni seguono i bordi reali (tolleranza di qualche pixel).
+Un errore piccolo e sottile è accettabile; un mobile, una gamba o un pezzo di muro dentro la
+maschera, o un'ampia zona di pavimento fuori, NO. Se bocci, indica le zone da correggere con
+coordinate in pixel della preview."""
 
 CHECK_GEOMETRY = """Verifica la prospettiva del pavimento.
 L'overlay mostra quadrati da 50 cm proiettati sul pavimento (linee gialle) e il perimetro

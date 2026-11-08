@@ -82,6 +82,46 @@ def _agent_cli() -> Check:
     )
 
 
+def _segmentation() -> Check:
+    from app.adapters import semantic
+
+    name = "Segmentazione automatica"
+    if os.environ.get("POSA_SEGMENTAZIONE", "1") == "0":
+        return Check(name, "avviso", "disattivata (POSA_SEGMENTAZIONE=0)", "")
+    if not semantic.available():
+        return Check(
+            name,
+            "avviso",
+            "non installata: la maschera la disegnano gli agenti",
+            "per i bordi precisi (gambe di sedie e tavoli): "
+            "pip install torch --index-url https://download.pytorch.org/whl/cpu && "
+            'pip install -e ".[segmentazione]"',
+        )
+    return Check(name, "ok", f"disponibile ({semantic.DEFAULT_MODEL})")
+
+
+def model_check() -> Check:
+    """Carica (e se serve scarica) il modello di segmentazione e lo prova su un'immagine."""
+    import numpy as np
+
+    from app.adapters import semantic
+
+    name = "Modello di segmentazione"
+    if not semantic.available():
+        return Check(name, "avviso", "non installato", "")
+    try:
+        img = np.full((240, 320, 3), 180, np.uint8)
+        semantic.segment(img)
+    except Exception as exc:
+        return Check(
+            name,
+            "errore",
+            str(exc)[:300],
+            "controlla la connessione a huggingface.co (primo download ~230 MB)",
+        )
+    return Check(name, "ok", "scaricato e funzionante")
+
+
 def _catalog() -> Check:
     try:
         from app.catalog.loader import Catalog
@@ -117,6 +157,7 @@ def offline_checks() -> list[Check]:
         _module("Interfaccia web (Gradio)", "gradio"),
         _agent_cli(),
         _catalog(),
+        _segmentation(),
         _credentials(),
     ]
 

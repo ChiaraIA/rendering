@@ -106,6 +106,31 @@ La pratica finisce in `pratiche/<data-ora>/`, e il risultato in `consegna/`:
 `final.png` (piena risoluzione, profilo colore originale), `mask.png`, `preview.jpg`,
 `prima_dopo.jpg` e `report.json`.
 
+## Segmentazione automatica (gambe di sedie e tavoli, bordi degli oggetti)
+
+Se è installato PyTorch, l'agente "pavimento" parte da una maschera calcolata da un modello
+di segmentazione (**UperNet-ConvNeXt**, licenza MIT, addestrato su ADE20K). Il modello
+riconosce pavimento, pareti, piani di lavoro e mobili; poi i bordi vengono rifiniti sulla foto
+a piena risoluzione. L'agente corregge solo dove serve (tappeti, oggetti) e il controllore
+vede anche gli ingrandimenti dei bordi più difficili. Nel Codespace si installa da sola; in
+locale:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+```bash
+pip install -e ".[segmentazione]"
+```
+```bash
+posa verifica --modelli
+```
+
+L'ultimo comando scarica il modello (circa 230 MB, una volta sola) da Hugging Face. Per
+disattivare la segmentazione: `POSA_SEGMENTAZIONE=0`.
+
+Per usare un modello più economico per gli agenti: `posa web --modello sonnet`. Costa circa
+la metà, ma nelle prove è meno affidabile sulla geometria della stanza.
+
 ## Mettere i vostri rivestimenti nel catalogo
 
 Per ogni articolo servono le foto di **una singola piastrella o doga**: frontale, ritagliata

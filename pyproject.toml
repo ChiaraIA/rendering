@@ -21,6 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100", "ruff>=0.6", "mypy>=1.11"]
+# segmentazione automatica (UperNet-ConvNeXt, MIT). PyTorch CPU va installato prima con:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+segmentazione = ["torch>=2.2", "transformers>=4.40"]
 
 [project.scripts]
 posa = "app.cli:main"

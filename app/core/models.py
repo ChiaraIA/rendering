@@ -73,6 +73,7 @@ class MaskOrigin(StrEnum):
     IMPORTED = "imported"
     POLYGON = "polygon"  # poligono proposto da un agente
     REFINED = "refined"  # poligono rifinito sui bordi reali (GrabCut)
+    SEMANTIC = "semantic"  # modello di segmentazione + rifinitura (+ correzioni dell'agente)
 
 
 class MaskStatus(StrEnum):

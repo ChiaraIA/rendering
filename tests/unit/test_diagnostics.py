@@ -19,6 +19,8 @@ def _no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_offline_checks_pass_in_a_working_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     checks = {c.name: c for c in diagnostics.offline_checks()}
+    seg = checks.pop("Segmentazione automatica")  # disattivata nei test (POSA_SEGMENTAZIONE=0)
+    assert seg.level == "avviso" and "disattivata" in seg.detail
     assert all(c.level == "ok" for c in checks.values()), checks
     assert "sk-ant-test" not in " ".join(c.detail for c in checks.values())  # mai stampata
 

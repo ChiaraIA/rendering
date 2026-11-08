@@ -13,6 +13,12 @@ from app.devtools import synthetic
 MATERIAL = "gres-grigio-30x30"
 
 
+@pytest.fixture(autouse=True)
+def _no_segmentation_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """I test non scaricano il modello di segmentazione: usano poligoni o un segmentatore finto."""
+    monkeypatch.setenv("POSA_SEGMENTAZIONE", "0")
+
+
 @pytest.fixture(scope="session")
 def catalog(tmp_path_factory: pytest.TempPathFactory) -> Catalog:
     """Catalogo di sola lettura condiviso; i test che lo alterano ne creano uno proprio."""
