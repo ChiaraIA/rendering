@@ -120,7 +120,7 @@ async def run_job(
         permission_mode="dontAsk",
         max_turns=config.ORCHESTRATOR_MAX_TURNS,
     )
-    ws.log("🧭 orchestratore: pratica avviata")
+    ws.log(f"🧭 orchestratore: pratica avviata (modello {model})")
     names: dict[str, str] = {}  # tool_use_id della delega -> nome del sotto-agente
     seen: set[str] = set()
     summary, cost = "", 0.0

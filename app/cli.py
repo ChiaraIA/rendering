@@ -26,6 +26,30 @@ def _room(value: str | None) -> tuple[float, float] | None:
         ) from None
 
 
+MODEL_ALIASES = {
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
+}
+
+ModelOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--modello",
+        help="Modello degli agenti: opus (predefinito), sonnet (circa metà costo), haiku, "
+        "oppure un ID completo. In alternativa la variabile POSA_MODEL",
+    ),
+]
+
+
+def _set_model(modello: str | None) -> None:
+    from app import config
+
+    if modello:
+        config.AGENT_MODEL = MODEL_ALIASES.get(modello.lower(), modello)
+    typer.echo(f"Modello degli agenti: {config.AGENT_MODEL}")
+
+
 def _default_out() -> Path:
     return Path("pratiche") / datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -43,10 +67,13 @@ def verifica(
     online: Annotated[
         bool, typer.Option("--online", help="Fa anche una chiamata di prova agli agenti (~0,1 USD)")
     ] = False,
+    modello: ModelOpt = None,
 ) -> None:
     """Controlla l'installazione e dice come risolvere ciò che manca."""
     from app import config
     from app.diagnostics import offline_checks, online_check
+
+    _set_model(modello)
 
     checks = offline_checks()
     if online:
@@ -80,11 +107,13 @@ def run(
         str | None, typer.Option("--stanza", help="Misure in metri, es. 4.2x3.6")
     ] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Cartella della pratica")] = None,
+    modello: ModelOpt = None,
 ) -> None:
     """Esegue una pratica completa con il sistema multiagente."""
     from app.agents.orchestrator import run_job, start
 
     _require_credentials()
+    _set_model(modello)
     out = out or _default_out()
     ws = start(foto, out, materiale, campione, _room(stanza), listener=typer.echo)
     outcome = asyncio.run(run_job(ws, Catalog.load()))
@@ -100,6 +129,7 @@ def run(
 def demo(
     out: Annotated[Path, typer.Option("--out")] = Path("pratiche/demo"),
     materiale: Annotated[str, typer.Option("--materiale", "-m")] = "laminato-rovere-120x20",
+    modello: ModelOpt = None,
 ) -> None:
     """Genera una stanza sintetica ed esegue il sistema multiagente su quella."""
     from app.devtools import synthetic
@@ -108,7 +138,7 @@ def demo(
     scene = synthetic.make_room_scene()
     photo = out.parent / f"{out.name}_stanza.jpg"
     synthetic.save_image(scene.photo, photo, fmt="JPEG", focal_35mm=26, camera=("Demo", "Phone"))
-    run(photo, materiale, None, "4.2x3.6", out)
+    run(photo, materiale, None, "4.2x3.6", out, modello)
 
 
 @app.command("catalogo")
@@ -276,11 +306,13 @@ def aggiungi_materiale(
 def web(
     port: Annotated[int, typer.Option(help="Porta")] = 7860,
     share: Annotated[bool, typer.Option(help="Link pubblico temporaneo (Gradio)")] = False,
+    modello: ModelOpt = None,
 ) -> None:
     """Avvia l'interfaccia web per la demo."""
     from app.diagnostics import credentials_problem
     from app.web import CSS, build_app
 
+    _set_model(modello)
     if problem := credentials_problem():  # la pagina si apre comunque, ma avvisiamo subito
         typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
     free = first_free_port(port)
