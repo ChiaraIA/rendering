@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from app.core import compositor, ingest, masking
-from app.core.colorspace import from_linear
+from app.core.colorspace import from_linear, to_linear
 from app.core.errors import IntegrityError, MaskNotConfirmedError
 from app.core.models import LightMap, MaterialLayer
 from app.devtools import synthetic
@@ -140,3 +140,24 @@ def test_deterministic() -> None:
     a = compositor.composite(src, mask, rec, _layer((0.3, 0.2, 0.1), 48, 64))
     b = compositor.composite(src, mask, rec, _layer((0.3, 0.2, 0.1), 48, 64))
     assert a.final_sha256 == b.final_sha256
+
+
+def test_soft_edge_replaces_only_the_floor_part_no_halo() -> None:
+    # pavimento chiaro, gamba scura; il pixel di bordo è metà gamba e metà pavimento
+    img = np.full((9, 9, 3), 200, dtype=np.uint8)
+    img[:, 5:] = 20  # gamba
+    lin = to_linear(img, "srgb")
+    edge = 0.5 * lin[0, 0] + 0.5 * lin[0, 6]
+    img[:, 4] = from_linear(edge[None], "srgb")[0]
+    src = ingest.from_array(img)
+    mask = np.zeros((9, 9), dtype=np.uint8)
+    mask[:, :4] = 255
+    mask[:, 4] = 128
+    res = compositor.composite(
+        src, mask, confirmed(mask, src.meta.normalized_sha256), _layer((0.02, 0.02, 0.02), 9, 9)
+    )
+    out = to_linear(res.pixels[4:5, 4:5], "srgb")[0, 0]
+    # resta solo la parte di gamba + il nuovo materiale: niente alone del vecchio pavimento
+    expected = 0.5 * 0.02 + 0.5 * lin[0, 6, 0]
+    assert out[0] == pytest.approx(expected, abs=0.01)
+    assert np.array_equal(res.pixels[mask == 0], src.pixels[mask == 0])

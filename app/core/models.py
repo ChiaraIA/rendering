@@ -237,10 +237,15 @@ class MaterialLayer:
 
 @dataclass(frozen=True, eq=False)
 class LightMap:
-    """Guadagno di luce a bassa frequenza (M3). Shape (h, w), limitato a `bbox`."""
+    """Guadagno di luce a bassa frequenza (M3). Shape (h, w), limitato a `bbox`.
+
+    `tint` è il colore della luce della stanza (R, G, B lineari, luminanza 1): con la luce
+    calda di una lampada un pavimento bianco nella foto vera appare caldo, non bianco puro.
+    """
 
     gain: NDArray[np.float32]
     bbox: BBox
+    tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
 class CheckResult(BaseModel):

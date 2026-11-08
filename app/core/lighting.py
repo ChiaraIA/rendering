@@ -74,6 +74,45 @@ def contact_shadow(
     return ao.astype(np.float32)
 
 
+# un po' meno della dominante misurata: il colore del catalogo resta riconoscibile
+TINT_STRENGTH = 0.85
+TINT_LIMIT = (0.6, 1.4)  # oltre, la stima è inaffidabile (foto con filtri, luci colorate)
+
+
+def scene_tint(
+    source: SourceImage, exclude: NDArray[np.uint8] | None = None
+) -> tuple[float, float, float]:
+    """Colore della luce della stanza, stimato dalle superfici bianche della foto.
+
+    Tra i pixel più luminosi (non saturati, fuori dal pavimento da sostituire) si prendono
+    quelli meno colorati: tende, soffitto, elettrodomestici, prese, cornici bianche. Il loro
+    colore medio è il colore della luce. Ritorna (R, G, B) lineari con luminanza 1; (1, 1, 1)
+    se la foto non offre abbastanza superfici chiare.
+    """
+    rgb = source.pixels[..., :3]
+    step = max(1, round(max(rgb.shape[:2]) / 800))  # basta una griglia rada
+    sub = rgb[::step, ::step]
+    ok = np.ones(sub.shape[:2], bool) if exclude is None else exclude[::step, ::step] == 0
+    ok &= sub.max(axis=-1) < 250  # niente zone bruciate (lampadine, riflessi)
+    lin = to_linear(sub, trc_for(source.meta.color_space)).reshape(-1, 3)
+    ok = ok.reshape(-1)
+    lum = lin @ np.array([0.2126, 0.7152, 0.0722])
+    if np.count_nonzero(ok) < 200:
+        return (1.0, 1.0, 1.0)
+    bright = ok & (lum >= np.quantile(lum[ok], 0.85))
+    chroma = (lin.max(axis=1) - lin.min(axis=1)) / np.maximum(lin.max(axis=1), 1e-6)
+    if np.count_nonzero(bright) < 50:
+        return (1.0, 1.0, 1.0)
+    white = bright & (chroma <= np.quantile(chroma[bright], 0.2))
+    c = lin[white].mean(axis=0)
+    c = c / max(float(c @ np.array([0.2126, 0.7152, 0.0722])), 1e-6)
+    t = 1.0 + (c - 1.0) * TINT_STRENGTH
+    if not np.all((t > TINT_LIMIT[0]) & (t < TINT_LIMIT[1])):
+        return (1.0, 1.0, 1.0)
+    t = t / float(t @ np.array([0.2126, 0.7152, 0.0722]))
+    return (float(t[0]), float(t[1]), float(t[2]))
+
+
 def combined_light(
     source: SourceImage,
     mask: NDArray[np.uint8],
@@ -82,4 +121,8 @@ def combined_light(
 ) -> LightMap:
     base = light_map(source, mask, bbox)
     gain = base.gain * contact_shadow(mask, bbox, px_per_mm)
-    return LightMap(gain=np.clip(gain, GAIN_MIN, GAIN_MAX).astype(np.float32), bbox=bbox)
+    return LightMap(
+        gain=np.clip(gain, GAIN_MIN, GAIN_MAX).astype(np.float32),
+        bbox=bbox,
+        tint=scene_tint(source, mask),
+    )

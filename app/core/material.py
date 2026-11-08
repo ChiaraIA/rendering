@@ -202,6 +202,24 @@ class Laying:
         i, j, s, t = self.cell(a, b)
         return i, j, s, t, (s < self.tile_w) & (t < self.tile_h)
 
+    def joint_fraction(
+        self,
+        s: NDArray[np.float64],
+        t: NDArray[np.float64],
+        fw_a: NDArray[np.float64],
+        fw_b: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """Rettangoli: frazione dell'impronta del campione occupata dalla fuga (filtro a box).
+
+        Una fuga di 2-3 mm lontano dalla camera è più stretta di un pixel: il test
+        "dentro/fuori" per campione la fa apparire tratteggiata. Qui si integra la fuga
+        sull'impronta reale del campione (in mm, lungo i due assi della posa), così una
+        fuga sottile diventa una linea continua più tenue, come in una foto vera.
+        """
+        ja = _box_overlap(s, fw_a, self.tile_w, self.pitch_w)
+        jb = _box_overlap(t, fw_b, self.tile_h, self.pitch_h)
+        return 1.0 - (1.0 - ja) * (1.0 - jb)
+
     def bevel(
         self,
         dx: NDArray[np.float64],
@@ -263,6 +281,23 @@ class Laying:
         i0 = math.floor((a.min() + self.tile_w / 2 - max(shifts)) / self.pitch_w) - margin
         i1 = math.floor((a.max() + self.tile_w / 2 - min(shifts)) / self.pitch_w) + margin
         return i0, i1, j0, j1
+
+
+def _box_overlap(
+    s: NDArray[np.float64], fw: NDArray[np.float64], tile: float, pitch: float
+) -> NDArray[np.float64]:
+    """Frazione di [s - fw/2, s + fw/2] coperta dalle fughe [tile + k*pitch, (k+1)*pitch]."""
+    joint = pitch - tile
+    if joint <= 0:
+        return np.zeros_like(s)
+    fw = np.maximum(fw, 1e-6)
+    lo, hi = s - fw / 2, s + fw / 2
+    total = np.zeros_like(s)
+    k0 = np.floor(lo / pitch) - 1
+    for dk in range(int(np.max(np.ceil(fw / pitch), initial=0)) + 3):
+        a = tile + (k0 + dk) * pitch
+        total += np.clip(np.minimum(hi, a + joint) - np.maximum(lo, a), 0.0, None)
+    return np.clip(total / fw, 0.0, 1.0)
 
 
 def _splitmix(x: NDArray[np.uint64]) -> NDArray[np.uint64]:
@@ -569,11 +604,23 @@ def tiled_layer(
     per_chunk = max(1, SAMPLES_PER_CHUNK // (n * n))
 
     def shade(
-        u: NDArray[np.float64], v: NDArray[np.float64], lod: NDArray[np.float64]
+        u: NDArray[np.float64],
+        v: NDArray[np.float64],
+        lod: NDArray[np.float64],
+        fw_a: NDArray[np.float64],
+        fw_b: NDArray[np.float64],
     ) -> tuple[NDArray[np.float32], NDArray[np.int64], NDArray[np.int64], NDArray[np.bool_]]:
         a, b = laying.local(u, v)
         i, j, s, t, in_tile = laying.locate(a, b)
         var, rot = vmap.lookup(i, j)
+        if not laying.hex:
+            # fuga filtrata sull'impronta del campione: niente fughe tratteggiate in lontananza
+            sc = np.clip(s, 0.0, np.nextafter(laying.tile_w, 0.0))
+            tc = np.clip(t, 0.0, np.nextafter(laying.tile_h, 0.0))
+            sn, tn = laying.texcoords(sc, tc, rot)
+            tex = sample_texture(atlas, var, sn, tn, lod)
+            jf = laying.joint_fraction(s, t, fw_a, fw_b).astype(np.float32)[:, None]
+            return tex * (1.0 - jf) + joint[None, :] * jf, i, j, in_tile
         sn, tn = laying.texcoords(s, t, rot)
         col = np.broadcast_to(joint, (u.size, 3)).copy()
         if np.any(in_tile):
@@ -594,11 +641,18 @@ def tiled_layer(
         mm_per_px = np.maximum(np.hypot(dudx, dvdx), np.hypot(dudy, dvdy))
         footprint = mm_per_px / n * atlas.texels_per_mm
         lod = np.log2(np.maximum(footprint, 1.0))
+        # impronta del sotto-campione lungo i due assi della posa (mm)
+        dadx = dudx * laying.cos + dvdx * laying.sin
+        dady = dudy * laying.cos + dvdy * laying.sin
+        dbdx = -dudx * laying.sin + dvdx * laying.cos
+        dbdy = -dudy * laying.sin + dvdy * laying.cos
+        fw_a = np.repeat((np.abs(dadx) + np.abs(dady)) / n, n * n)
+        fw_b = np.repeat((np.abs(dbdx) + np.abs(dbdy)) / n, n * n)
 
         sx = (gx[:, None] + ox[None, :]).ravel()
         sy = (gy[:, None] + oy[None, :]).ravel()
         u, v, _ = geometry.plane_coords(hi, sx, sy)
-        col, _, _, _ = shade(u, v, np.repeat(lod, n * n))
+        col, _, _, _ = shade(u, v, np.repeat(lod, n * n), fw_a, fw_b)
         out[py, px] = col.reshape(-1, n * n, 3).mean(axis=1)
 
         uc, vc, _ = geometry.plane_coords(hi, gx + 0.5, gy + 0.5)

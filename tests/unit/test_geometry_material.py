@@ -180,3 +180,37 @@ def test_boundary_details_focus_on_objects() -> None:
     assert sheet.shape[2] == 3 and sheet.shape[0] >= 300  # almeno un dettaglio ingrandito 2x
     empty = overlays.boundary_details(img, np.zeros((480, 640), np.uint8))
     assert empty.shape == img.shape  # nessun bordo: restituisce l'overlay intero
+
+
+def test_scene_tint_follows_warm_light_and_ignores_the_floor() -> None:
+    # stanza "neutra": nessuna dominante
+    gray = np.full((120, 160, 3), 128, np.uint8)
+    gray[:20] = 235
+    assert np.allclose(lighting.scene_tint(ingest.from_array(gray)), 1.0, atol=1e-6)
+    # luce calda: le superfici bianche appaiono calde -> tinta R > G > B, luminanza 1
+    warm = np.full((120, 160, 3), (110, 90, 70), np.uint8)
+    warm[:20] = (240, 222, 190)  # soffitto bianco sotto luce calda
+    floor = np.zeros((120, 160), np.uint8)
+    warm[80:] = (245, 200, 120)  # vecchio pavimento beige e chiarissimo: non deve contare
+    floor[80:] = 255
+    r, g, b = lighting.scene_tint(ingest.from_array(warm), floor)
+    assert r > g > b
+    assert abs(0.2126 * r + 0.7152 * g + 0.0722 * b - 1.0) < 1e-6
+    assert b > 0.7  # dominante del soffitto, non del pavimento giallo
+
+
+def test_far_joints_are_continuous_lines_not_dashes() -> None:
+    lay = material.Laying(
+        tile_w=200.0, tile_h=200.0, pitch_w=203.0, pitch_h=203.0, shift=0.0,
+        cos=1.0, sin=0.0, cx=0.0, cy=0.0,
+    )  # fmt: skip
+    s = np.arange(0.0, 203.0, 0.05)  # un campione ogni 0.05 mm lungo un passo
+    t = np.full_like(s, 100.0)
+    # impronta di 10 mm (fuga di 3 mm più stretta del campione): mai 0 o 1 netto vicino alla fuga
+    jf = lay.joint_fraction(s, t, np.full_like(s, 10.0), np.full_like(s, 10.0))
+    assert jf.max() == pytest.approx(0.3, abs=1e-6)
+    # integrale conservato: la fuga "pesa" quanto la sua larghezza vera
+    assert jf.mean() * 203 == pytest.approx(3.0, rel=1e-3)
+    # impronta minuscola: torna il test dentro/fuori
+    sharp = lay.joint_fraction(s, t, np.full_like(s, 1e-4), np.full_like(s, 1e-4))
+    assert np.count_nonzero((sharp > 1e-3) & (sharp < 1 - 1e-3)) <= 2  # solo sul bordo esatto

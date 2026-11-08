@@ -4,7 +4,9 @@ Integrità per costruzione:
     final = original.copy()            # i pixel esterni non passano mai per float
     final[alpha > 0, :3] = blend(...)  # solo dentro la maschera, in luce lineare
 
-con  blend = a * materiale * luce + (1 - a) * originale,  a = alpha / 255.
+con  blend = originale + a * (materiale * luce - vecchio_pavimento),  a = alpha / 255,
+dove vecchio_pavimento è il pixel stesso dove a = 1 (=> materiale * luce) e, sui bordi
+morbidi, il colore del vecchio pavimento lì accanto (=> si sostituisce solo la sua parte).
 Il canale alpha della foto (se presente) non viene mai toccato.
 """
 
@@ -12,10 +14,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from app.core.colorspace import from_linear, to_linear, trc_for
+from app.core.colorspace import Trc, from_linear, to_linear, trc_for
 from app.core.errors import IntegrityError
 from app.core.ingest import sha256_array
 from app.core.masking import bbox_of, require_approved
@@ -42,6 +45,40 @@ class CompositeResult:
             raise TypeError("CompositeResult può essere creato solo da compositor.composite()")
         if self.pixels.flags.writeable or self.alpha.flags.writeable:
             raise TypeError("CompositeResult deve contenere array in sola lettura")
+
+
+EDGE_SIGMA_FRACTION = 0.002  # raggio della stima del vecchio pavimento: ~3 px su 1600
+
+
+def _old_floor_near_edges(
+    rgb_view: NDArray[np.uint8],
+    sub_a: NDArray[np.uint8],
+    trc: Trc,
+    lin_o: NDArray[np.float64],
+    idx: NDArray[np.bool_],
+) -> NDArray[np.float64]:
+    """Colore (lineare) del vecchio pavimento per ogni pixel della maschera.
+
+    Dove alpha = 255 è il pixel stesso. Sui bordi morbidi è la media dei pixel pienamente
+    di pavimento lì vicino; se vicino non ce ne sono, il pixel stesso (= blend classico).
+    """
+    out = lin_o.copy()
+    soft = (sub_a > 0) & (sub_a < 255)
+    full = sub_a == 255
+    if not soft.any() or not full.any():
+        return out
+    sigma = max(1.5, EDGE_SIGMA_FRACTION * max(sub_a.shape))
+    lin = to_linear(rgb_view, trc).astype(np.float32)
+    w = full.astype(np.float32)
+    num = cv2.GaussianBlur(lin * w[..., None], (0, 0), sigma)
+    den = cv2.GaussianBlur(w, (0, 0), sigma)
+    ok = soft & (den > 0.05)
+    est = num[ok] / den[ok][:, None]
+    pos = np.flatnonzero(idx.ravel())  # posizione di ogni pixel di idx nell'array compresso
+    lookup = np.full(idx.size, -1, dtype=np.int64)
+    lookup[pos] = np.arange(pos.size)
+    out[lookup[np.flatnonzero(ok.ravel())]] = est
+    return out
 
 
 def _inside(inner: BBox, outer: BBox) -> bool:
@@ -85,13 +122,18 @@ def composite(
             gain = np.asarray(
                 light.gain[y0 - gy0 : y1 - gy0, x0 - gx0 : x1 - gx0][idx], dtype=np.float64
             )
-            lin_m = lin_m * gain[:, None]
+            lin_m = lin_m * gain[:, None] * np.asarray(light.tint, dtype=np.float64)
 
         trc = trc_for(source.meta.color_space)
         rgb_view = final[y0:y1, x0:x1, :3]
         lin_o = to_linear(rgb_view[idx], trc)
         a = (sub_a[idx].astype(np.float64) / 255.0)[:, None]
-        rgb_view[idx] = from_linear(a * lin_m + (1.0 - a) * lin_o, trc)
+        # Un pixel di bordo (0 < alpha < 1) è in parte pavimento e in parte oggetto (gamba,
+        # mobile): si sostituisce solo la parte di pavimento, togliendo il colore del vecchio
+        # pavimento lì accanto invece del pixel intero. Così non resta l'alone chiaro del
+        # vecchio pavimento intorno alle gambe. Con alpha = 1 il risultato è il materiale.
+        old_floor = _old_floor_near_edges(rgb_view, sub_a, trc, lin_o, idx)
+        rgb_view[idx] = from_linear(np.clip(lin_o + a * (lin_m - old_floor), 0.0, 1.0), trc)
 
     final.setflags(write=False)
     alpha = mask.copy()
