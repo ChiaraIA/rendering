@@ -42,3 +42,16 @@ def test_run_stops_early_without_credentials(monkeypatch: pytest.MonkeyPatch) ->
 def test_broken_module_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     check = diagnostics._module("Modulo finto", "modulo_che_non_esiste_123")
     assert check.level == "errore" and "pip install" in check.fix
+
+
+def test_first_free_port_skips_busy_ports() -> None:
+    import socket
+
+    from app.cli import first_free_port
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy:
+        busy.bind(("0.0.0.0", 0))
+        busy.listen()
+        taken = busy.getsockname()[1]
+        free = first_free_port(taken)
+        assert free is not None and free != taken and taken < free < taken + 20

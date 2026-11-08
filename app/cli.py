@@ -283,7 +283,42 @@ def web(
 
     if problem := credentials_problem():  # la pagina si apre comunque, ma avvisiamo subito
         typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
-    build_app().queue().launch(server_name="0.0.0.0", server_port=port, share=share, css=CSS)
+    free = first_free_port(port)
+    if free is None:
+        typer.secho(
+            f"Le porte da {port} a {port + PORT_TRIES - 1} sono tutte occupate. "
+            'Ferma i "posa web" già accesi con:  pkill -f "posa web"',
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if free != port:
+        typer.secho(
+            f'La porta {port} è già in uso: probabilmente "posa web" è già acceso in un altro '
+            f"terminale (puoi aprire quella pagina dalla scheda PORTS, porta {port}, "
+            'oppure fermarlo con:  pkill -f "posa web").\n'
+            f"Avvio questa interfaccia sulla porta {free}.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    build_app().queue().launch(server_name="0.0.0.0", server_port=free, share=share, css=CSS)
+
+
+PORT_TRIES = 20
+
+
+def first_free_port(start: int, tries: int = PORT_TRIES) -> int | None:
+    """Prima porta libera da `start` in poi (None se sono tutte occupate)."""
+    import socket
+
+    for candidate in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("0.0.0.0", candidate))
+            except OSError:
+                continue
+            return candidate
+    return None
 
 
 def main() -> None:

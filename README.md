@@ -51,6 +51,9 @@ pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
 - Se il comando `posa` non esiste, l'installazione automatica non è finita o è fallita:
   rilanciala con `pip install -e .`. Il dettaglio è nel log di creazione: Command Palette
   (F1) → **"Codespaces: View Creation Log"**.
+- Se `posa web` dice che la porta 7860 è in uso, un'altra copia è già accesa: aprila dalla
+  scheda **PORTS**, oppure fermala con `pkill -f "posa web"`. In ogni caso `posa web` si
+  avvia da solo sulla prima porta libera e te la indica.
 - Se la chiave è stata aggiunta dopo aver creato il Codespace, il Codespace non la vede:
   ricrealo oppure, solo per la sessione, `export ANTHROPIC_API_KEY=sk-ant-...`.
 
