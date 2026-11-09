@@ -28,6 +28,7 @@ from PIL import Image
 
 from app.server import shopify_auth as auth
 from app.server.jobs import STEPS, JobQueue, Runner, job_dir, shop_dir
+from app.server.limits import BodyLimitMiddleware
 from app.server.settings import Settings
 from app.server.store import Store
 
@@ -68,6 +69,8 @@ def create_app(
     sync_lock = threading.Lock()
 
     app = FastAPI(title="posa", docs_url=None, redoc_url=None, openapi_url=None)
+    # limite sul corpo applicato mentre arriva (anche senza Content-Length)
+    app.add_middleware(BodyLimitMiddleware, max_bytes=st.max_upload_mb * 1024 * 1024 + 64 * 1024)
     app.state.store, app.state.jobs, app.state.settings = store, jobs, st
     if start_workers:
         jobs.start()
@@ -105,7 +108,7 @@ def create_app(
             resp.headers["Access-Control-Allow-Origin"] = origin
             resp.headers["Vary"] = "Origin"
             resp.headers["Access-Control-Allow-Methods"] = "GET, POST"
-            resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Posa-Permesso"
             resp.headers["Access-Control-Max-Age"] = "600"
         return resp
 
@@ -163,14 +166,15 @@ def create_app(
     # ---------------------------------------------------------- API del browser
     @app.post("/api/pratiche")
     async def create_job(request: Request) -> Response:
-        form = await request.form(max_files=1, max_fields=5)
-        token = str(form.get("permesso", ""))
+        # il permesso si verifica PRIMA di leggere il corpo: senza, il server non legge nulla
+        token = request.headers.get("x-posa-permesso", "")
         data = auth.read_upload_token(st.upload_key, token)
         if data is None:
             return _err(401, "permesso non valido o scaduto")
         shop = store.shop(data["shop"])
         if shop is None or not shop.active:
             return _err(403, "negozio non attivo")
+        form = await request.form(max_files=1, max_fields=3)
         room = str(form.get("stanza", "") or "").strip().lower().replace(",", ".")
         if room:
             m = ROOM.match(room)
@@ -239,6 +243,9 @@ def create_app(
             body, request.headers.get("x-shopify-hmac-sha256", ""), st.shopify_secret
         ):
             return _err(401, "firma non valida")
+        hook_id = request.headers.get("x-shopify-webhook-id", "")
+        if hook_id and not store.use_nonce(f"webhook:{hook_id[:100]}"):
+            return Response(status_code=200)  # già ricevuto: un replay non ha effetto
         topic = request.headers.get("x-shopify-topic", "")
         domain = request.headers.get("x-shopify-shop-domain", "").lower()
         if not auth.SHOP_DOMAIN.match(domain):

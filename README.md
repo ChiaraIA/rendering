@@ -39,7 +39,7 @@ pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
 1. Su GitHub: **Code → Codespaces → ⋯ → New with options**, scegli il branch e crea il
    Codespace. Quando lo chiede, inserisci la tua `ANTHROPIC_API_KEY`: viene salvata come
    segreto di Codespaces e non finisce nel codice.
-2. Attendi l'installazione automatica (`pip install -e .`), poi nel terminale scrivi:
+2. Attendi l'installazione automatica (`pip install -e '.[demo]'`), poi nel terminale scrivi:
    ```bash
    posa web
    ```
@@ -51,7 +51,7 @@ pavimento**, e il rivestimento inserito è esattamente l'articolo del catalogo.
   come risolverlo. Con `posa verifica --online` fa anche una chiamata di prova agli agenti
   (pochi centesimi).
 - Se il comando `posa` non esiste, l'installazione automatica non è finita o è fallita:
-  rilanciala con `pip install -e .`. Il dettaglio è nel log di creazione: Command Palette
+  rilanciala con `pip install -e '.[demo]'`. Il dettaglio è nel log di creazione: Command Palette
   (F1) → **"Codespaces: View Creation Log"**.
 - Se `posa web` dice che la porta 7860 è in uso, un'altra copia è già accesa: aprila dalla
   scheda **PORTS**, oppure fermala con `pkill -f "posa web"`. In ogni caso `posa web` si
@@ -70,7 +70,7 @@ git clone https://github.com/ChiaraIA/rendering.git && cd rendering
 python -m venv .venv && source .venv/bin/activate
 ```
 ```bash
-pip install -e .
+pip install -e '.[demo]'
 ```
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...

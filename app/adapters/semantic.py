@@ -22,6 +22,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 DEFAULT_MODEL = os.environ.get("POSA_SEG_MODEL", "openmmlab/upernet-convnext-tiny")
+# versione esatta dei pesi (commit di Hugging Face): un repository alterato non cambia il
+# modello in uso. Si aggiorna di proposito, dopo averlo verificato.
+MODEL_REVISION = os.environ.get("POSA_SEG_REVISIONE", "876ffc56b819a829448f7e81e9f8606deef6fb65")
 WORK_SIDE = 896  # lato lungo per il modello (multiplo di 32): più dettaglio su gambe e piedi
 REFINE_SIDE = 1600  # lato lungo per la rifinitura dei bordi
 
@@ -108,8 +111,11 @@ def _load(model_name: str) -> tuple[Any, Any, Any]:
     from transformers import AutoImageProcessor, UperNetForSemanticSegmentation
 
     torch.set_num_threads(max(1, os.cpu_count() or 1))
-    proc = AutoImageProcessor.from_pretrained(model_name)
-    model = UperNetForSemanticSegmentation.from_pretrained(model_name).eval()
+    proc = AutoImageProcessor.from_pretrained(model_name, revision=MODEL_REVISION)
+    # solo safetensors: i pesi in formato pickle (.bin) possono eseguire codice al caricamento
+    model = UperNetForSemanticSegmentation.from_pretrained(
+        model_name, revision=MODEL_REVISION, use_safetensors=True
+    ).eval()
     return torch, proc, model
 
 

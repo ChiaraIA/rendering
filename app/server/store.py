@@ -178,7 +178,8 @@ class Store:
         sets: list[str] = ["updated_at=?"]
         args: list[float | str] = [time.time()]
         if status is not None:
-            assert status in STATUSES
+            if status not in STATUSES:
+                raise ValueError(f"stato sconosciuto: {status}")
             sets.append("status=?")
             args.append(status)
         if step is not None:

@@ -1,0 +1,10 @@
+.posa-prova__finestra { max-width: 760px; width: calc(100% - 32px); border: 0; border-radius: 12px; padding: 24px; }
+.posa-prova__finestra::backdrop { background: rgba(0, 0, 0, .55); }
+.posa-prova__chiudi-form { position: absolute; top: 8px; right: 12px; }
+.posa-prova__chiudi { background: none; border: 0; font-size: 28px; cursor: pointer; }
+.posa-prova__modulo { display: grid; gap: 12px; margin: 16px 0; }
+.posa-prova__modulo label { display: grid; gap: 4px; font-size: 14px; }
+.posa-prova__privacy { font-size: 12px; opacity: .75; margin: 0; }
+.posa-prova__stato { min-height: 1.4em; font-weight: 600; }
+.posa-prova__risultato { width: 100%; height: auto; border-radius: 8px; margin-top: 12px; }
+.posa-prova__scarica { display: inline-block; margin-top: 8px; }

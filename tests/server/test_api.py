@@ -104,7 +104,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-unt
 
 def _upload(client: TestClient, token: str, data: bytes | None = None, **form: str):  # type: ignore[no-untyped-def]
     files = {"foto": ("stanza.jpg", data if data is not None else jpeg(), "image/jpeg")}
-    return client.post("/api/pratiche", data={"permesso": token, **form}, files=files)
+    return client.post("/api/pratiche", data=form, files=files, headers={"X-Posa-Permesso": token})
 
 
 def _token(client: TestClient, shop: str = SHOP) -> str:
@@ -263,3 +263,26 @@ def test_pixel_limit_is_enforced_even_below_pillow_double_threshold(env) -> None
     buf = io.BytesIO()
     Image.fromarray(np.zeros((2100, 2100), np.uint8)).save(buf, format="PNG", optimize=True)
     assert _upload(client, _token(client), buf.getvalue()).status_code == 415  # 4.4 MP > 4 MP
+
+
+def test_webhook_replay_is_ignored_and_secrets_scrubbed(env, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client, app, _runner, st = env
+    raw = b"{}"
+    sig = base64.b64encode(hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()).decode()
+    h = {
+        "X-Shopify-Hmac-Sha256": sig,
+        "X-Shopify-Topic": "app/uninstalled",
+        "X-Shopify-Shop-Domain": SHOP,
+        "X-Shopify-Webhook-Id": "evento-1",
+    }
+    assert client.post("/webhooks/shopify", content=raw, headers=h).status_code == 200
+    assert app.state.store.shop(SHOP).active is False
+    app.state.store.set_active(SHOP, True)  # il negozio reinstalla
+    assert client.post("/webhooks/shopify", content=raw, headers=h).status_code == 200
+    assert app.state.store.shop(SHOP).active is True  # il replay non lo disattiva di nuovo
+    import os
+
+    monkeypatch.setenv("SHOPIFY_API_SECRET", "x" * 32)
+    monkeypatch.setenv("POSA_ADMIN_TOKEN", "y" * 32)
+    st.scrub_environment()
+    assert "SHOPIFY_API_SECRET" not in os.environ and "POSA_ADMIN_TOKEN" not in os.environ

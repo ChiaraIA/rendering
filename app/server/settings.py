@@ -39,6 +39,12 @@ class Settings:
     token_ttl_s: int = field(default_factory=lambda: _int("POSA_DURATA_PERMESSO_S", 900))
     proxy_max_age_s: int = field(default_factory=lambda: _int("POSA_ETA_FIRMA_PROXY_S", 300))
 
+    def scrub_environment(self) -> None:
+        """Toglie i segreti del servizio dall'ambiente: i processi figli (le sessioni degli
+        agenti) non li ereditano, quindi non sono raggiungibili nemmeno in teoria."""
+        for name in ("SHOPIFY_API_SECRET", "POSA_ADMIN_TOKEN", "POSA_CHIAVE_CARICAMENTI"):
+            os.environ.pop(name, None)
+
     def check(self) -> list[str]:
         """Problemi di configurazione che impediscono di andare in produzione."""
         problems = []

@@ -1,0 +1,6 @@
+api_version = "2026-10"
+
+[[extensions]]
+name = "Prova nella tua stanza"
+handle = "prova-in-stanza"
+type = "theme"

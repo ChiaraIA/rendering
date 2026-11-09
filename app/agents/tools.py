@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -60,10 +61,26 @@ def _default_segmenter() -> Segmenter | None:
 MAX_ATTEMPTS = config.MAX_ATTEMPTS
 
 
+MAX_POLYGONS = 40  # limiti sugli argomenti degli agenti: anche un agente manipolato
+MAX_POINTS = 400  # non può far lavorare il server all'infinito
+MAX_TEXT = 2000
+
+
+class ArgumentError(ValueError):
+    pass
+
+
 def _polys(raw: Any) -> list[Polygon]:
     out: list[Polygon] = []
-    for poly in raw or []:
+    raw = raw or []
+    if not isinstance(raw, list) or len(raw) > MAX_POLYGONS:
+        raise ArgumentError(f"al massimo {MAX_POLYGONS} poligoni")
+    for poly in raw:
+        if not isinstance(poly, list) or len(poly) > MAX_POINTS:
+            raise ArgumentError(f"al massimo {MAX_POINTS} punti per poligono")
         pts = [(float(p[0]), float(p[1])) for p in poly]
+        if not all(math.isfinite(c) and abs(c) < 1e6 for pt in pts for c in pt):
+            raise ArgumentError("coordinate non valide")
         if len(pts) >= 3:
             out.append(pts)
     return out
@@ -197,9 +214,12 @@ class Toolbox:
         if block := can_attempt(self.state, "maschera"):
             return {"errore": block}
         src = self.ws.source
-        include = [self.ws.to_full(p) for p in _polys(pavimento)]
-        exclude = [self.ws.to_full(p) for p in _polys(escludi)]
-        limit = [self.ws.to_full(p) for p in _polys(area)]
+        try:
+            include = [self.ws.to_full(p) for p in _polys(pavimento)]
+            exclude = [self.ws.to_full(p) for p in _polys(escludi)]
+            limit = [self.ws.to_full(p) for p in _polys(area)]
+        except (ArgumentError, TypeError, ValueError, IndexError) as exc:
+            return {"errore": f"poligoni non validi: {exc}"}
         auto = await self._automatic_mask() if base == "automatica" else None
         note = ""
         if base == "automatica" and auto is None:
@@ -343,7 +363,7 @@ class Toolbox:
     async def catalogo(self, cerca: str = "", massimo: int = 24) -> Result:
         """Articoli del catalogo; con migliaia di articoli si cerca per parole (colore,
         effetto, formato...) e si ricevono al massimo `massimo` risultati con le miniature."""
-        found = self.catalog.search(cerca)
+        found = self.catalog.search(str(cerca)[:200])
         items, out = [], []
         for spec in found[: max(1, min(massimo, 48))]:
             tex = self.catalog.load_variants(spec)[0]
@@ -646,6 +666,7 @@ class Toolbox:
         return {"consegnato": self.state.delivered}
 
     async def richiedi_operatore(self, motivo: str) -> Result:
+        motivo = str(motivo)[:MAX_TEXT]
         self.state.escalation = motivo
         self.ws.persist()
         (self.ws.root / "ESCALATION.txt").write_text(motivo + "\n", encoding="utf-8")
@@ -682,8 +703,11 @@ class Toolbox:
     def _trace(self, name: str, args: dict[str, Any]) -> None:
         """Traccia degli input grezzi ricevuti dagli agenti (audit)."""
         path = self.ws.root / "lavoro" / "tracce.jsonl"
+        if path.exists() and path.stat().st_size > 5_000_000:
+            return  # tetto alla traccia: un agente impazzito non riempie il disco
+        line = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"tool": name, "args": args}, ensure_ascii=False) + "\n")
+            f.write(line[:200_000] + "\n")
 
     # ---------------------------------------------------------------- server MCP
     def mcp_server(self) -> Any:

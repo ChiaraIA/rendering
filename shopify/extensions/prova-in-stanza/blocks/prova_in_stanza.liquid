@@ -1,0 +1,44 @@
+{%- comment -%}
+  Blocco per la pagina prodotto: il cliente carica la foto della sua stanza e vede il
+  rivestimento posato. Le richieste passano dall'App Proxy (/apps/posa), firmato da Shopify.
+{%- endcomment -%}
+<div class="posa-prova"
+     data-prodotto="{{ product.handle | escape }}"
+     data-variante="{{ product.selected_or_first_available_variant.id }}"
+     data-max-mb="15">
+  <button type="button" class="posa-prova__apri button">{{ block.settings.testo_pulsante | escape }}</button>
+  <dialog class="posa-prova__finestra" aria-label="{{ block.settings.testo_pulsante | escape }}">
+    <form method="dialog" class="posa-prova__chiudi-form"><button class="posa-prova__chiudi" aria-label="Chiudi">×</button></form>
+    <h2 class="posa-prova__titolo">{{ block.settings.titolo | escape }}</h2>
+    <p class="posa-prova__testo">{{ block.settings.spiegazione | escape }}</p>
+    <form class="posa-prova__modulo">
+      <label>Foto della stanza
+        <input type="file" name="foto" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" required>
+      </label>
+      <label>Misure della stanza in metri (facoltativo)
+        <input type="text" name="stanza" inputmode="decimal" placeholder="es. 4.2x3.6" maxlength="11" pattern="\d{1,2}([.,]\d{1,2})?x\d{1,2}([.,]\d{1,2})?">
+      </label>
+      <p class="posa-prova__privacy">{{ block.settings.privacy | escape }}</p>
+      <button type="submit" class="button button--primary">Prova questo rivestimento</button>
+    </form>
+    <p class="posa-prova__stato" role="status" aria-live="polite"></p>
+    <img class="posa-prova__risultato" alt="Il rivestimento nella tua stanza" hidden>
+    <a class="posa-prova__scarica" hidden download>Scarica l'immagine</a>
+  </dialog>
+</div>
+
+{% schema %}
+{
+  "name": "Prova nella tua stanza",
+  "target": "section",
+  "javascript": "prova.js",
+  "stylesheet": "prova.css",
+  "enabled_on": { "templates": ["product"] },
+  "settings": [
+    { "type": "text", "id": "testo_pulsante", "label": "Testo del pulsante", "default": "Prova nella tua stanza" },
+    { "type": "text", "id": "titolo", "label": "Titolo", "default": "Guarda questo rivestimento a casa tua" },
+    { "type": "textarea", "id": "spiegazione", "label": "Spiegazione", "default": "Carica una foto del pavimento della tua stanza: in pochi minuti lo vedrai con il nuovo rivestimento." },
+    { "type": "textarea", "id": "privacy", "label": "Nota sulla privacy", "default": "La foto serve solo a creare l'anteprima e viene cancellata automaticamente dopo 7 giorni." }
+  ]
+}
+{% endschema %}

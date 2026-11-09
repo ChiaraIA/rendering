@@ -16,7 +16,6 @@ dependencies = [
     "opencv-python-headless>=4.10",
     "pillow-heif>=0.18",
     "claude-agent-sdk>=0.2",
-    "gradio>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +23,12 @@ dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100", "ruff>=0.6", "mypy>=1.
 # segmentazione automatica (UperNet-ConvNeXt, MIT). PyTorch CPU va installato prima con:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 segmentazione = ["torch>=2.2", "transformers>=4.40"]
+# servizio per i negozi Shopify. Pillow 13 corregge decine di vulnerabilità nei decoder
+# di immagini (le foto arrivano da sconosciuti): NON installarlo insieme a "demo".
+server = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.18", "pillow>=13.0.0"]
+# interfaccia di demo (Gradio). Gradio richiede ancora Pillow < 13: solo uso interno,
+# protetta da POSA_WEB_PASSWORD, mai esposta ai clienti.
+demo = ["gradio>=5.0"]
 
 [project.scripts]
 posa = "app.cli:main"

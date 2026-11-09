@@ -1,0 +1,37 @@
+# Configurazione dell'app Shopify "posa – Prova nella tua stanza".
+# Sostituire SERVER con l'indirizzo pubblico del servizio (es. posa.tuodominio.it) e
+# client_id con quello dell'app creata nel Partner Dashboard, poi: shopify app deploy
+
+client_id = "INSERIRE_CLIENT_ID"
+name = "Prova nella tua stanza"
+application_url = "https://SERVER/salute"
+embedded = false
+
+[access_scopes]
+# serve solo per ricevere le notifiche sui prodotti (il catalogo si legge dal negozio pubblico)
+scopes = "read_products"
+
+[auth]
+redirect_urls = ["https://SERVER/salute"]
+
+[app_proxy]
+# il negozio inoltra https://negozio/apps/posa/* a https://SERVER/proxy/* firmando la richiesta
+url = "https://SERVER/proxy"
+subpath = "posa"
+prefix = "apps"
+
+[webhooks]
+# usare l'ultima versione stabile dell'API indicata nel Partner Dashboard
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["products/create", "products/update", "products/delete", "app/uninstalled"]
+  uri = "https://SERVER/webhooks/shopify"
+
+  [[webhooks.subscriptions]]
+  # obbligatori per le app pubbliche (GDPR)
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "https://SERVER/webhooks/shopify"
+
+[pos]
+embedded = false

@@ -346,7 +346,9 @@ def shopify(
         )
         raise typer.Exit(code=2)
     try:
-        report = shop.sync(store, out, collezione or saved_coll, log=typer.echo)
+        host = shop.store_url(store).split("://", 1)[1]
+        safe = shop.safe_fetcher(store, host)  # solo negozio e CDN Shopify (anti-SSRF)
+        report = shop.sync(store, out, collezione or saved_coll, fetch=safe, log=typer.echo)
     except Exception as exc:  # rete, negozio inesistente, elenco disattivato
         typer.secho(f"Sincronizzazione non riuscita: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from None
@@ -364,7 +366,8 @@ def _sync_shop_at_start() -> None:
         return
     typer.echo(f"Aggiorno il catalogo dal negozio {store}…")
     try:
-        report = shop.sync(store, shop_catalog_dir(), coll)
+        host = shop.store_url(store).split("://", 1)[1]
+        report = shop.sync(store, shop_catalog_dir(), coll, fetch=shop.safe_fetcher(store, host))
         typer.echo(report.summary())
     except Exception as exc:
         typer.secho(
@@ -388,6 +391,7 @@ def server(
     settings = Settings()
     for problem in settings.check():
         typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
+    settings.scrub_environment()  # gli agenti non ereditano i segreti del servizio
     uvicorn.run(
         create_app(settings),
         host=host,
@@ -405,10 +409,21 @@ def web(
     modello: ModelOpt = None,
 ) -> None:
     """Avvia l'interfaccia web per la demo."""
+    import os
+
     from app.diagnostics import credentials_problem
     from app.web import CSS, build_app
 
     _set_model(modello)
+    password = os.environ.get("POSA_WEB_PASSWORD", "")
+    if share and len(password) < 12:
+        typer.secho(
+            "Il link pubblico (--share) espone la demo a chiunque e ogni prova consuma credito "
+            "API. Imposta prima una password: export POSA_WEB_PASSWORD='almeno-12-caratteri'",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if problem := credentials_problem():  # la pagina si apre comunque, ma avvisiamo subito
         typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
     free = first_free_port(port)
@@ -430,7 +445,20 @@ def web(
             err=True,
         )
     _sync_shop_at_start()
-    build_app().queue().launch(server_name="0.0.0.0", server_port=free, share=share, css=CSS)
+    if not password:
+        typer.secho(
+            "Demo senza password: raggiungibile da chi è sulla tua rete. Per proteggerla: "
+            "export POSA_WEB_PASSWORD='...'",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    build_app().queue().launch(
+        server_name="0.0.0.0",  # nosec B104: demo per Codespaces, protetta da POSA_WEB_PASSWORD
+        server_port=free,
+        share=share,
+        css=CSS,
+        auth=("posa", password) if password else None,
+    )
 
 
 PORT_TRIES = 20
@@ -443,7 +471,7 @@ def first_free_port(start: int, tries: int = PORT_TRIES) -> int | None:
     for candidate in range(start, start + tries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                sock.bind(("0.0.0.0", candidate))
+                sock.bind(("0.0.0.0", candidate))  # nosec B104: solo verifica della porta libera
             except OSError:
                 continue
             return candidate

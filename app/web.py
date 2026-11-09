@@ -81,7 +81,8 @@ def _sync_shop() -> tuple[str, Catalog]:
         )
         return msg, Catalog.load()
     try:
-        report = shop.sync(store, shop_catalog_dir(), coll)
+        host = shop.store_url(store).split("://", 1)[1]
+        report = shop.sync(store, shop_catalog_dir(), coll, fetch=shop.safe_fetcher(store, host))
     except Exception as exc:
         msg = f"❌ Negozio non raggiungibile ({exc}): resta il catalogo precedente."
         return msg, Catalog.load()
@@ -273,4 +274,4 @@ def _work_gallery(ws: Any) -> list[tuple[str, str]]:
 
 
 if __name__ == "__main__":
-    build_app().queue().launch(server_name="0.0.0.0", css=CSS)
+    build_app().queue().launch(server_name="127.0.0.1", css=CSS)

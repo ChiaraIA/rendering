@@ -90,11 +90,14 @@ FINISH_WORDS = {
 
 # ----------------------------------------------------------------------------- rete
 def http_get(url: str, retries: int = 3) -> bytes:
+    """Download generico (solo http/https). Per i cataloghi dei negozi usare safe_fetcher."""
+    if urllib.parse.urlparse(url).scheme not in {"http", "https"}:
+        raise ValueError(f"schema non consentito: {url[:40]}")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return bytes(resp.read())
+            with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310: schema verificato
+                return bytes(resp.read(MAX_FETCH_BYTES + 1))[:MAX_FETCH_BYTES]
         except urllib.error.HTTPError as exc:
             # 429: troppe richieste, o verifica anti-bot di Shopify: si aspetta e si riprova
             if exc.code in {429, 503} and attempt < retries:

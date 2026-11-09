@@ -347,3 +347,27 @@ def test_composition_photo_is_split_into_figures_and_printed_grids_stay_whole() 
     assert len(figures) == 1 and "riquadri" in how
     assert figures[0].shape[1] > 2 * figures[0].shape[0]  # 50x20 intera
     assert len(ci.distinct_tiles([a, a.copy(), b])) == 2  # le copie si tolgono
+
+
+def test_safe_fetcher_blocks_ssrf(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un negozio malevolo non può far scaricare al server indirizzi interni o arbitrari."""
+    fetch = shop.safe_fetcher("www.negozio.it", "negozio.myshopify.com", check_dns=False)
+    for url in (
+        "http://cdn.shopify.com/x.jpg",  # non https
+        "https://169.254.169.254/latest/meta-data/",  # metadati del cloud
+        "https://localhost/x",
+        "https://attaccante.com/x.jpg",
+        "https://cdn.shopify.com:8443/x.jpg",  # porta diversa
+        "https://user:pass@cdn.shopify.com/x.jpg",
+        "file:///etc/passwd",
+        "https://cdn.shopify.com.attaccante.com/x.jpg",
+    ):
+        with pytest.raises(shop.UnsafeURL):
+            fetch(url)
+    # host consentito ma che risolve su un IP interno (DNS rebinding)
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("10.0.0.5", 443))])
+    strict = shop.safe_fetcher("www.negozio.it", "negozio.myshopify.com")
+    with pytest.raises(shop.UnsafeURL):
+        strict("https://www.negozio.it/products.json")
