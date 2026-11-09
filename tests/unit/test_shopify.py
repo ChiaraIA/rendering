@@ -198,7 +198,7 @@ def test_sync_builds_a_catalog_ready_for_rendering(
         "shop-ceramica-colori-verde",
     ]
     assert status["Collante professionale"].status == "saltato"
-    assert any("formato" in n for n in status["Collante professionale"].notes)
+    assert any("non è un rivestimento" in n for n in status["Collante professionale"].notes)
     assert status["Gres Bianco 30x30"].status == "saltato"
 
     monkeypatch.setenv("POSA_SHOPIFY_DIR", str(out))
@@ -272,3 +272,49 @@ def test_store_url_and_errors() -> None:
     assert shop.store_url("https://x.myshopify.com/collections/a") == "https://x.myshopify.com"
     with pytest.raises(ValueError):
         shop.store_url("https://")
+
+
+def test_store_tag_conventions() -> None:
+    """Tag nello stile del negozio: Formato_60x120, Superficie_Lucida, Utilizzo_Rivestimento."""
+    product = {
+        "title": "Calacatta Gold - Gres effetto marmo",
+        "product_type": "Gres Porcellanato",
+        "tags": [
+            "Formato_Grande",
+            "Formato_60x120",
+            "Superficie_Lucida",
+            "Utilizzo_Rivestimento",
+            "Collezione_Spina di Pesce",  # tag di collezione: non decide la posa
+        ],
+    }
+    r = shop.product_rules(product, None)
+    assert not isinstance(r, str)
+    assert (r.w_cm, r.h_cm, r.finish, r.uses) == (120.0, 60.0, "lucida", ["rivestimento"])
+    hexa = shop.product_rules(
+        {"title": "Terra Giglio - Gres", "tags": ["Formato_22x25", "Formato_Esagonale"]}, None
+    )
+    assert not isinstance(hexa, str) and hexa.hexagon and hexa.w_cm == 25.0
+    assert "spina di pesce" in str(
+        shop.product_rules({"title": "Rovere Chevron Spina di Pesce 7.5x45 gres"}, None)
+    )
+    assert "non è un rivestimento" in str(
+        shop.product_rules({"title": "Box doccia 80x190", "product_type": "Box"}, None)
+    )
+    plans, why = shop.plan_product(
+        {"title": "Gres 60x60", "tags": ["Fuori Produzione"], "images": [_img(1, "x", 1)]}, STORE
+    )
+    assert plans == [] and "Fuori Produzione" in why[0]
+
+
+def test_joint_lines_tell_compositions_from_single_tiles() -> None:
+    from app.storage.catalog_import import has_joint_lines
+
+    tile = synthetic.make_tile_texture(600, (70, 70, 72), seed=8)
+    assert not has_joint_lines(tile)
+    grid = np.concatenate([np.concatenate([tile[:200, :200]] * 3, 1)] * 3, 0).copy()
+    grid[199::200, :] = 150  # fughe chiare sottili, poco contrastate come nelle foto vere
+    grid[:, 199::200] = 150
+    assert has_joint_lines(grid)
+    grooves = tile.copy()
+    grooves[::12] = 40  # rigatura fitta (rilievo): non sono fughe
+    assert not has_joint_lines(grooves)

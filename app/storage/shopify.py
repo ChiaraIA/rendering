@@ -29,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
@@ -46,7 +47,10 @@ Fetch = Callable[[str], bytes]
 USER_AGENT = "posa-catalogo/1.0 (+sincronizzazione catalogo rivestimenti)"
 PAGE_LIMIT = 250
 MAX_PAGES = 40
-IMAGE_WIDTH = 2048  # le foto si scaricano già ridotte dal CDN di Shopify
+IMAGE_WIDTH = 1200  # le foto si scaricano già ridotte dal CDN di Shopify
+MAX_IMAGES = 8  # foto esaminate per articolo
+MAX_VARIANTS = 4  # facce diverse della stessa piastrella usate nella posa
+WORKERS = 8  # download in parallelo
 
 WOOD = re.compile(r"laminat|parquet|legno|rovere|noce|listone|doga|\bspc\b|\blvt\b|vinilic", re.I)
 HEX = re.compile(r"esagon|hexag", re.I)
@@ -56,6 +60,24 @@ SIZE = re.compile(r"(\d+(?:[.,]\d+)?)\s*[x×X*]\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)?",
 ONE_SIZE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(mm|cm)\b", re.I)
 SIZE_OPTION = re.compile(r"formato|dimension|misur|size|taglia", re.I)
 TEXTURE_ALT = re.compile(r"texture|render", re.I)
+HERRINGBONE = re.compile(r"spina di pesce|spina pesce|herringbone|chevron", re.I)
+# un articolo è un rivestimento se tipo, tag o titolo lo dicono (niente box doccia, colle...)
+TILE = re.compile(
+    r"piastrell|gres|ceramic|rivestiment|pavimen|parquet|laminat|\bspc\b|\blvt\b|mosaic|"
+    r"cotto|marmo|pietra|cementin|pasta di vetro|klinker|maiolic|listone|doga|esagon",
+    re.I,
+)
+EXCLUDED_TAGS = {"render:no", "no-render", "fuori produzione"}
+FINISH_WORDS = {
+    "lucida": "lucida",
+    "lappata": "lucida",
+    "levigata": "lucida",
+    "satinata": "satinata",
+    "semilucida": "satinata",
+    "opaca": "opaca",
+    "naturale": "opaca",
+    "strutturata": "opaca",
+}
 
 
 # ----------------------------------------------------------------------------- rete
@@ -66,8 +88,9 @@ def http_get(url: str, retries: int = 3) -> bytes:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return bytes(resp.read())
         except urllib.error.HTTPError as exc:
-            if exc.code == 429 and attempt < retries:  # troppe richieste: aspettiamo
-                time.sleep(2**attempt)
+            # 429: troppe richieste, o verifica anti-bot di Shopify: si aspetta e si riprova
+            if exc.code in {429, 503} and attempt < retries:
+                time.sleep(5 * 2**attempt)
                 continue
             raise
         except urllib.error.URLError:
@@ -118,13 +141,20 @@ def _tags(product: dict[str, Any]) -> list[str]:
     return [t.strip() for t in raw if t and t.strip()]
 
 
-def _tag_values(tags: list[str]) -> dict[str, str]:
-    out = {}
+def _tag_values(tags: list[str]) -> dict[str, list[str]]:
+    """'fuga:2' e anche lo stile dei tag del negozio 'Formato_60x60', 'Superficie_Lucida'."""
+    out: dict[str, list[str]] = {}
     for t in tags:
-        if ":" in t:
-            k, v = t.split(":", 1)
-            out[k.strip().lower()] = v.strip()
+        sep = ":" if ":" in t else "_" if "_" in t else None
+        if sep:
+            k, v = t.split(sep, 1)
+            out.setdefault(k.strip().lower(), []).append(v.strip())
     return out
+
+
+def _first(tv: dict[str, list[str]], key: str, default: str = "") -> str:
+    vals = tv.get(key)
+    return vals[0] if vals else default
 
 
 def _num(text: str) -> float:
@@ -176,6 +206,8 @@ class Rules:
     joint_color: str | None
     finish: str
     notes: list[str] = field(default_factory=list)
+    uses: list[str] = field(default_factory=lambda: ["pavimento", "rivestimento"])
+    wood: bool = False
 
     @property
     def hexagon(self) -> bool:
@@ -188,14 +220,21 @@ def product_rules(product: dict[str, Any], size_text: str | None) -> Rules | str
     tv = _tag_values(tags)
     words = " ".join([product.get("title", ""), product.get("product_type", ""), *tags])
     notes: list[str] = []
-    hexagon = tv.get("posa", "").lower() in {"hex", "esagoni", "esagonale"} or bool(
-        HEX.search(words)
+    if not TILE.search(words):
+        return "non è un rivestimento (tipo, tag e titolo non parlano di piastrelle)"
+    if HERRINGBONE.search(product.get("title", "")):  # i tag di collezione non bastano
+        return "posa a spina di pesce non ancora supportata"
+    formats = tv.get("formato", [])
+    hexagon = (
+        _first(tv, "posa").lower() in {"hex", "esagoni", "esagonale"}
+        or any(f.lower() == "esagonale" for f in formats)
+        or bool(HEX.search(words))
     )
     wood = bool(WOOD.search(words))
 
     size = None
     for source, text in (
-        ("tag formato", tv.get("formato")),
+        *(("tag formato", f) for f in formats),
         ("opzione della variante", size_text),
         ("titolo", product.get("title")),
     ):
@@ -205,7 +244,7 @@ def product_rules(product: dict[str, Any], size_text: str | None) -> Rules | str
     if hexagon:
         if size:
             w = max(size)  # 25x22: punta-punta x lato-lato
-        elif (single := parse_single(tv.get("formato") or product.get("title", ""))) is not None:
+        elif (single := parse_single(product.get("title", ""))) is not None:
             w = single
         else:
             return "formato non trovato: aggiungi il tag formato:25 (punta-punta in cm)"
@@ -218,32 +257,50 @@ def product_rules(product: dict[str, Any], size_text: str | None) -> Rules | str
         if w_cm < h_cm:  # le doghe si descrivono di solito "20x120": la lunghezza va su x
             w_cm, h_cm = h_cm, w_cm
         long_plank = w_cm >= 3 * h_cm
-        pattern = tv.get("posa", "running_bond" if (wood or long_plank) else "grid").lower()
+        pattern = _first(tv, "posa", "running_bond" if (wood or long_plank) else "grid").lower()
         pattern = {"griglia": "grid", "sfalsata": "running_bond", "correre": "running_bond"}.get(
             pattern, pattern
         )
         if pattern not in {"grid", "running_bond"}:
-            return f"posa {tv.get('posa')!r} non supportata (usa grid, running_bond o esagoni)"
+            return f"posa {_first(tv, 'posa')!r} non supportata (usa grid, running_bond o esagoni)"
 
     bond = 0.33 if wood else 0.5
     if "sfalsamento" in tv:
-        bond = _num(tv["sfalsamento"])
-    rotation = int(_num(tv["rotazione"])) if "rotazione" in tv else 0
+        bond = _num(_first(tv, "sfalsamento"))
+    rotation = int(_num(_first(tv, "rotazione"))) if "rotazione" in tv else 0
 
     if "fuga" in tv:
-        joint = _num(tv["fuga"].lower().replace("mm", "").strip())
+        joint = _num(_first(tv, "fuga").lower().replace("mm", "").strip())
     else:
-        joint = 0.0 if wood else (2.0 if max(w_cm, h_cm) >= 45 else 3.0)
+        joint = (
+            0.0
+            if wood and not re.search(r"gres|ceramic", words, re.I)
+            else (2.0 if max(w_cm, h_cm) >= 45 else 3.0)
+        )
         notes.append(f"fuga {joint:g} mm predefinita (tag fuga:N per cambiarla)")
-    color = tv.get("colore-fuga")
+    color = _first(tv, "colore-fuga") or None
     if color and not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
         return f"colore-fuga {color!r} non valido: usa #rrggbb"
 
-    text = words + " " + _plain(product.get("body_html"))
-    finish = tv.get("finitura", "").lower()
+    finish = _first(tv, "finitura").lower()
     if finish not in {"opaca", "satinata", "lucida"}:
-        finish = "lucida" if GLOSSY.search(text) else "satinata" if SATIN.search(text) else "opaca"
-    return Rules(w_cm, h_cm, pattern, bond, rotation, joint, color, finish, notes)
+        # tag del negozio (Superficie_Lucida...), altrimenti parole nel testo
+        found = [
+            FINISH_WORDS[v.lower()] for v in tv.get("superficie", []) if v.lower() in FINISH_WORDS
+        ]
+        if found:
+            finish = "lucida" if "lucida" in found else found[0]
+        else:
+            text = words + " " + _plain(product.get("body_html"))
+            finish = (
+                "lucida" if GLOSSY.search(text) else "satinata" if SATIN.search(text) else "opaca"
+            )
+    uses = [
+        u
+        for u, key in (("pavimento", "pavimento"), ("rivestimento", "rivestimento"))
+        if any(v.lower() == key for v in tv.get("utilizzo", []))
+    ] or ["pavimento", "rivestimento"]
+    return Rules(w_cm, h_cm, pattern, bond, rotation, joint, color, finish, notes, uses, wood)
 
 
 # ------------------------------------------------------------------------- foto
@@ -274,11 +331,30 @@ def tile_texture(
     if not may_be_surface:
         raise Unusable("non è una piastrella su sfondo uniforme (ambientazione?)")
     h, w = img.shape[:2]
-    if abs((w / h) / (rules.w_cm / rules.h_cm) - 1) > 0.25 and rules.w_cm / rules.h_cm > 1.5:
-        raise Unusable("proporzioni diverse dal formato: non è la superficie della doga")
+    tile = rules.w_cm / rules.h_cm
+    if abs((h / w) / tile - 1) < abs((w / h) / tile - 1):  # foto in verticale
+        img = np.ascontiguousarray(np.rot90(img))
+        h, w = w, h
+    if abs((w / h) / tile - 1) > 0.12:
+        raise Unusable(
+            f"proporzioni {w}x{h} diverse dal formato {rules.w_cm:g}x{rules.h_cm:g}: "
+            "composizione o ambientazione"
+        )
     if not ci.looks_like_surface(img):
         raise Unusable("sembra un'ambientazione, non la superficie della piastrella")
+    if not rules.wood and ci.has_joint_lines(img):
+        raise Unusable("si vedono fughe: sono più piastrelle o un'ambientazione")
     return ci.crop_to_aspect(img, rules.w_cm, rules.h_cm, flatten), "superficie della piastrella"
+
+
+def _same_family(a: NDArray[np.uint8], b: NDArray[np.uint8]) -> bool:
+    """Due foto sono facce della stessa piastrella se il colore medio è simile."""
+    import cv2
+
+    la = cv2.cvtColor(a[None, :, :3].reshape(1, -1, 3), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+    lb = cv2.cvtColor(b[None, :, :3].reshape(1, -1, 3), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+    d = la.astype(np.float32).mean(axis=0) - lb.astype(np.float32).mean(axis=0)
+    return float(np.linalg.norm(d)) < 18.0
 
 
 def default_joint_color(textures: list[NDArray[np.uint8]]) -> str:
@@ -306,11 +382,12 @@ def plan_product(product: dict[str, Any], base_url: str) -> tuple[list[Plan], li
     """Articoli da creare per un prodotto Shopify, e i motivi degli scarti."""
     tags = _tags(product)
     title = unescape(product.get("title", "articolo"))
-    if any(t.lower() in {"render:no", "no-render"} for t in tags):
-        return [], ["escluso dal tag render:no"]
+    excluded = [t for t in tags if t.lower() in EXCLUDED_TAGS]
+    if excluded:
+        return [], [f"escluso dal tag {excluded[0]!r}"]
     images: list[dict[str, Any]] = sorted(
         product.get("images") or [], key=lambda i: i.get("position", 0)
-    )
+    )[:MAX_IMAGES]
     if not images:
         return [], ["nessuna foto"]
     by_id = {i.get("id"): i for i in images}
@@ -347,7 +424,7 @@ def plan_product(product: dict[str, Any], base_url: str) -> tuple[list[Plan], li
             cand, is_marked = images, False
         aid = f"shop-{slug(handle)}" + (f"-{slug(label)}" if label else "")
         name = title + (f" — {label}" if label else "")
-        mixed = is_marked or any(t.lower() in {"misto", "mix", "varianti"} for t in tags)
+        mixed = True  # più facce della stessa piastrella = varianti, come nella posa vera
         plans.append(Plan(aid[:64].rstrip("-"), name, rules, cand, is_marked, mixed, url))
     return plans, skipped
 
@@ -408,20 +485,24 @@ def _build_article(
     rules = plan.rules
     flatten = not rules.hexagon
     textures: list[NDArray[np.uint8]] = []
+    hexagon_or_marked = plan.marked or rules.hexagon
     for k, image in enumerate(plan.images):
-        if textures and not plan.mixed:
-            break  # una sola foto basta, se l'articolo non è un misto
+        if len(textures) >= (len(plan.images) if plan.marked else MAX_VARIANTS):
+            break
+        pos = image.get("position", k + 1)
         try:
             photo = load_photo(fetch(image_url(str(image.get("src", "")))))
-            may_be_surface = plan.marked or k == 0
-            tex, how = tile_texture(photo, rules, may_be_surface, flatten)
+            tex, how = tile_texture(photo, rules, True, flatten)
         except Unusable as exc:
-            notes.append(f"foto {image.get('position', k + 1)} ignorata: {exc}")
+            notes.append(f"foto {pos} ignorata: {exc}")
             continue
         except (OSError, ValueError, urllib.error.URLError) as exc:
-            notes.append(f"foto {image.get('position', k + 1)} non scaricabile: {exc}")
+            notes.append(f"foto {pos} non scaricabile: {exc}")
             continue
-        notes.append(f"foto {image.get('position', k + 1)}: {how}")
+        if textures and not hexagon_or_marked and not _same_family(textures[0], tex):
+            notes.append(f"foto {pos} ignorata: colori diversi dalla prima (decoro o altro colore)")
+            continue
+        notes.append(f"foto {pos}: {how}")
         textures.append(tex)
     if not textures:
         notes.append(
@@ -463,6 +544,7 @@ def _build_article(
         "variant_rotations": rotations,
         "texture_color_space": "srgb",
         "finish": rules.finish,
+        "uses": rules.uses,
     }
     try:
         MaterialSpec.model_validate(entry)
@@ -510,9 +592,10 @@ def sync(
         }
 
     report = SyncReport(store=base)
-    materials: list[dict[str, Any]] = []
     taken: set[str] = set()  # codici assegnati: articoli con lo stesso nome restano distinti
     new_state: dict[str, Any] = {}
+    # 1. cosa fare per ogni articolo (veloce, in ordine): riuso o nuovo piano
+    rows: list[tuple[str, str, ProductReport, list[Plan], list[dict[str, Any]]]] = []
     for product in products:
         pid = str(product.get("id"))
         title = unescape(product.get("title", pid))
@@ -523,27 +606,52 @@ def sync(
             if all(
                 (tex_dir / v["texture_file"]).is_file() for e in entries for v in e["variants"]
             ) and len(entries) == len(prev.get("articles", [])):
-                materials.extend(entries)
                 taken.update(e["id"] for e in entries)
                 new_state[pid] = prev
                 ids = [e["id"] for e in entries]
                 status = "invariato" if ids else "saltato"
-                report.products.append(ProductReport(title, status, ids, prev["notes"]))
+                rows.append(
+                    (pid, fp, ProductReport(title, status, ids, prev["notes"]), [], entries)
+                )
                 continue
-        say(f"· {title}")
         plans, skipped = plan_product(product, base)
-        pr = ProductReport(title, "saltato", notes=list(skipped))
         for plan in plans:
             plan.article_id = _unique(plan.article_id, taken, old_state, pid)
             taken.add(plan.article_id)
-            entry, notes = _build_article(plan, fetch, tex_dir)
+        rows.append((pid, fp, ProductReport(title, "saltato", notes=list(skipped)), plans, []))
+
+    # 2. foto: scaricate ed elaborate in parallelo
+    todo = [plan for row in rows for plan in row[3]]
+    say(f"{len(todo)} articoli da preparare")
+    built: dict[str, tuple[dict[str, Any] | None, list[str]]] = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = {pool.submit(_build_article, plan, fetch, tex_dir): plan for plan in todo}
+        for n, fut in enumerate(as_completed(futures), 1):
+            plan = futures[fut]
+            try:
+                built[plan.article_id] = fut.result()
+            except Exception as exc:  # una foto rotta non ferma il catalogo
+                built[plan.article_id] = (None, [f"errore: {exc}"])
+            if n % 100 == 0 or n == len(todo):
+                say(f"  {n}/{len(todo)} articoli preparati")
+
+    # 3. catalogo nell'ordine del negozio
+    materials: list[dict[str, Any]] = []
+    for pid, fp, pr, plans, entries in rows:
+        materials.extend(entries)
+        if not plans and pr.status != "saltato":
+            report.products.append(pr)
+            continue
+        for plan in plans:
+            entry, notes = built[plan.article_id]
             pr.notes.extend(f"{plan.name}: {n}" for n in notes)
             if entry is not None:
                 materials.append(entry)
                 pr.articles.append(entry["id"])
-        if pr.articles:
+        if plans and pr.articles:
             pr.status = "importato"
-        new_state[pid] = {"fingerprint": fp, "articles": pr.articles, "notes": pr.notes}
+        if plans or pid not in new_state:
+            new_state[pid] = {"fingerprint": fp, "articles": pr.articles, "notes": pr.notes}
         report.products.append(pr)
 
     report.removed = sorted(set(old_catalog) - {m["id"] for m in materials})

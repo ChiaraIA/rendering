@@ -151,6 +151,8 @@ class MaterialSpec(BaseModel):
     variant_rotations: list[Rotation] = [0]
     texture_color_space: Literal["srgb"] = "srgb"
     finish: Finish = "opaca"  # finitura della superficie: decide quanto riflette
+    # dove si può posare: a terra, a parete (rivestimenti) o entrambi
+    uses: list[Literal["pavimento", "rivestimento"]] = ["pavimento", "rivestimento"]
 
     @property
     def is_hex(self) -> bool:

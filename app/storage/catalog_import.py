@@ -308,3 +308,67 @@ def hexagon_texture(
     if gains:
         tex = apply_gains(tex, gains)
     return tex
+
+
+def _line_peaks(profile: NDArray[np.float32]) -> list[int]:
+    """Righe (o colonne) nettamente diverse dalle vicine lungo tutta la foto."""
+    n = len(profile)
+    detr = profile - cv2.GaussianBlur(profile.reshape(-1, 1), (0, 0), 3).ravel()
+    a = np.abs(detr)
+    edge = max(2, int(0.04 * n))
+    a[:edge], a[-edge:] = 0, 0
+    mad = float(np.median(np.abs(a - np.median(a)))) * 1.4826
+    thr = max(6.0 * mad, 1.2)
+    peaks: list[int] = []
+    for i in range(1, n - 1):
+        if a[i] > thr and a[i] >= a[i - 1] and a[i] >= a[i + 1]:
+            if peaks and i - peaks[-1] < 4:
+                if a[i] > a[peaks[-1]]:
+                    peaks[-1] = i
+                continue
+            peaks.append(i)
+    return peaks
+
+
+def _regular_joints(peaks: list[int], n: int) -> bool:
+    if not 1 <= len(peaks) <= 7:
+        return False  # nessuna linea, o tante righe fitte (rilievo, rigatura): non sono fughe
+    if len(peaks) == 1:
+        return 0.4 * n < peaks[0] < 0.6 * n  # due piastrelle affiancate
+    gaps = np.diff(peaks)
+    return bool(gaps.min() > 0.12 * n and gaps.max() / gaps.min() < 1.35)
+
+
+def _consistent(g: NDArray[np.float32], peaks: list[int], chunks: int = 8) -> list[int]:
+    """Tiene le linee presenti lungo TUTTA la foto (una fuga), non solo in un tratto (una
+    venatura che la attraversa in diagonale). `g`: righe = direzione della linea."""
+    if not peaks:
+        return []
+    parts = np.array_split(g, chunks, axis=1)
+    detr = []
+    for part in parts:
+        prof = part.mean(axis=1)
+        detr.append(prof - cv2.GaussianBlur(prof.reshape(-1, 1), (0, 0), 3).ravel())
+    whole = g.mean(axis=1)
+    whole = whole - cv2.GaussianBlur(whole.reshape(-1, 1), (0, 0), 3).ravel()
+    keep = []
+    for r in peaks:
+        lo, hi = max(0, r - 1), r + 2
+        sign = np.sign(whole[r])
+        ok = sum(1 for d in detr if (d[lo:hi] * sign).max() > 0.4 * abs(whole[r]))
+        if ok >= chunks - 1:
+            keep.append(r)
+    return keep
+
+
+def has_joint_lines(img: NDArray[np.uint8]) -> bool:
+    """Fughe dritte che attraversano tutta la foto a distanza regolare: sono più piastrelle
+    (composizione o ambientazione), non la superficie di una sola. Venature e rilievi no."""
+    g = cv2.cvtColor(np.ascontiguousarray(img[..., :3]), cv2.COLOR_RGB2GRAY)
+    scale = 512 / max(g.shape)
+    g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA).astype(np.float32)
+    rows = _line_peaks(g.mean(axis=1))
+    cols = _line_peaks(g.mean(axis=0))
+    rows_ok = _consistent(g, rows) if len(rows) <= 7 else rows
+    cols_ok = _consistent(g.T, cols) if len(cols) <= 7 else cols
+    return _regular_joints(rows_ok, g.shape[0]) or _regular_joints(cols_ok, g.shape[1])

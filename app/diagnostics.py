@@ -125,9 +125,9 @@ def model_check() -> Check:
 
 def _catalog() -> Check:
     try:
-        from app.catalog.loader import Catalog
+        from app.catalog.loader import DEFAULT_CATALOG, Catalog
 
-        cat = Catalog.load()
+        cat = Catalog.load(DEFAULT_CATALOG)  # il catalogo del negozio si conta in _shop
         for spec in cat.materials:
             cat.load_variants(spec)
     except Exception as exc:

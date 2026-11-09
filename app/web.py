@@ -28,9 +28,13 @@ CSS = """
 """
 
 
-def _catalog_gallery(cat: Catalog) -> list[tuple[Any, str]]:
+GALLERY_MAX = 24  # miniature mostrate (il catalogo del negozio può avere migliaia di articoli)
+CHOICES_MAX = 300
+
+
+def _catalog_gallery(cat: Catalog, query: str = "") -> list[tuple[Any, str]]:
     items = []
-    for spec in cat.materials:
+    for spec in cat.search(query)[:GALLERY_MAX]:
         tex = cat.load_variants(spec)[0]
         joint = None
         if spec.joint_mm > 0 and spec.joint_color:
@@ -59,8 +63,9 @@ def _example_photo() -> str:
     return str(path)
 
 
-def _choices(cat: Catalog) -> list[tuple[str, str]]:
-    return [(f"{m.name} ({m.id})", m.id) for m in cat.materials] + [(NONE_CHOICE, "")]
+def _choices(cat: Catalog, query: str = "") -> list[tuple[str, str]]:
+    found = cat.search(query)[:CHOICES_MAX]
+    return [(f"{m.name} ({m.id})", m.id) for m in found] + [(NONE_CHOICE, "")]
 
 
 def _sync_shop() -> tuple[str, Catalog]:
@@ -167,6 +172,10 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                     file_types=["image", ".heic", ".heif", ".HEIC"],
                 )
                 example = gr.Button("Usa una stanza di esempio", size="sm")
+                search = gr.Textbox(
+                    label=f"Cerca nel catalogo ({len(cat.materials)} articoli)",
+                    placeholder="es. grigio cemento 60x60, esagona, rovere…",
+                )
                 material = gr.Dropdown(
                     choices=choices,
                     value=cat.materials[0].id,
@@ -226,6 +235,21 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
             )
 
         refresh.click(refresh_shop, outputs=[material, gallery, shop_status])
+
+        def do_search(q: str):
+            c = holder["cat"]
+            found = c.search(q)
+            first = found[0].id if found else ""
+            return gr.update(choices=_choices(c, q), value=first), _catalog_gallery(c, q)
+
+        search.submit(do_search, inputs=search, outputs=[material, gallery])
+        search.change(do_search, inputs=search, outputs=[material, gallery])
+
+        def pick(q: str, evt: gr.SelectData):
+            found = holder["cat"].search(q)[:GALLERY_MAX]
+            return found[evt.index].id if 0 <= evt.index < len(found) else gr.update()
+
+        gallery.select(pick, inputs=search, outputs=material)
         go.click(
             run, inputs=[photo, material, sample, room], outputs=[status, log, slider, work, files]
         )

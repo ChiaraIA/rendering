@@ -20,6 +20,14 @@ from app.core.models import MaterialSpec, TextureVariant
 DEFAULT_CATALOG = Path(__file__).parent / "data" / "catalog.json"
 
 
+def _fold(text: str) -> str:
+    """Minuscole e senza accenti, per la ricerca."""
+    import unicodedata
+
+    t = unicodedata.normalize("NFKD", text.lower())
+    return "".join(c for c in t if not unicodedata.combining(c)).replace(",", ".")
+
+
 def shop_catalog_dir() -> Path:
     """Cartella del catalogo sincronizzato dal negozio Shopify (`posa shopify`)."""
     return Path(os.environ.get("POSA_SHOPIFY_DIR", "catalogo_shopify"))
@@ -78,6 +86,13 @@ class Catalog:
     @property
     def materials(self) -> list[MaterialSpec]:
         return list(self.doc.materials)
+
+    def search(self, query: str = "") -> list[MaterialSpec]:
+        """Articoli che contengono tutte le parole cercate (nel codice o nel nome)."""
+        words = [w for w in _fold(query).split() if w]
+        if not words:
+            return self.materials
+        return [m for m in self.doc.materials if all(w in _fold(f"{m.id} {m.name}") for w in words)]
 
     def get(self, material_id: str) -> MaterialSpec:
         try:

@@ -334,9 +334,12 @@ class Toolbox:
         return self._reply("geometria", att, {"focale": focal_txt})
 
     # ------------------------------------------------------------------ materiale
-    async def catalogo(self) -> Result:
+    async def catalogo(self, cerca: str = "", massimo: int = 24) -> Result:
+        """Articoli del catalogo; con migliaia di articoli si cerca per parole (colore,
+        effetto, formato...) e si ricevono al massimo `massimo` risultati con le miniature."""
+        found = self.catalog.search(cerca)
         items, out = [], []
-        for spec in self.catalog.materials:
+        for spec in found[: max(1, min(massimo, 48))]:
             tex = self.catalog.load_variants(spec)[0]
             joint = None
             if spec.joint_mm > 0 and spec.joint_color:
@@ -353,11 +356,23 @@ class Toolbox:
                     "fuga_mm": spec.joint_mm,
                     "posa": spec.pattern.type,
                     "rotazione": spec.pattern.rotation_deg,
+                    "finitura": spec.finish,
+                    "uso": spec.uses,
                     "varianti": len(spec.variants),
                 }
             )
-        sheet = self.ws.write_image(overlays.contact_sheet(items), "catalogo.jpg")
-        return {"articoli": out, "foglio_miniature": sheet}
+        sheet = (
+            self.ws.write_image(overlays.contact_sheet(items), "catalogo.jpg") if items else None
+        )
+        return {
+            "totale_trovati": len(found),
+            "mostrati": len(out),
+            "articoli": out,
+            "foglio_miniature": sheet,
+            "nota": "cerca con parole del nome (es. 'grigio cemento 60x60')"
+            if len(found) > len(out)
+            else "",
+        }
 
     async def scegli_materiale(self, codice: str, motivazione: str = "") -> Result:
         if block := can_attempt(self.state, "materiale"):
@@ -730,9 +745,19 @@ class Toolbox:
                 )
             )
 
-        @tool("catalogo", "Elenco degli articoli a catalogo e foglio delle miniature.", {})
+        @tool(
+            "catalogo",
+            "Cerca nel catalogo (parole del nome: colore, effetto, formato, collezione) e "
+            "restituisce gli articoli trovati con il foglio delle miniature.",
+            {
+                "type": "object",
+                "properties": {"cerca": {"type": "string"}, "massimo": {"type": "integer"}},
+            },
+        )
         async def t_catalogo(args: dict[str, Any]) -> dict[str, Any]:
-            return wrap(await self.catalogo())
+            return wrap(
+                await self.catalogo(str(args.get("cerca", "")), int(args.get("massimo", 24)))
+            )
 
         @tool(
             "scegli_materiale",

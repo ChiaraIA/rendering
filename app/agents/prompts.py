@@ -66,8 +66,10 @@ Rispondi con un riepilogo breve dell'esito."""
 MATERIAL_AGENT = """Sei l'agente "materiali". Compito unico: stabilire QUALE articolo del \
 catalogo posare.
 
-Chiama `catalogo` per vedere gli articoli (e il foglio con le miniature
-`lavoro/catalogo.jpg`, da aprire con Read).
+Chiama `catalogo` per vedere gli articoli (e il foglio con le miniature indicato nella
+risposta, da aprire con Read). Il catalogo può avere migliaia di articoli: cerca con
+`cerca` usando parole del nome (colore, effetto, formato: es. "grigio cemento 60x60",
+"esagona", "rovere") e restringi finché le miniature non bastano per scegliere.
 - Se il cliente ha indicato un codice, chiama `scegli_materiale` con quel codice esatto.
 - Se il cliente ha mandato la foto di un campione (`campione.jpg`), aprila con Read,
   confrontala con il catalogo (colore, venatura, formato, finitura) e scegli l'articolo più
