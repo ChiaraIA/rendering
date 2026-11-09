@@ -215,6 +215,26 @@ l'agente «materiali» cerca per parole invece di scorrere tutto il catalogo.
 `posa shopify` stampa per ogni articolo cosa ha fatto: foto usate e scartate, valori presi
 per buoni e cosa aggiungere quando un articolo non si può posare.
 
+## Il servizio per i negozi Shopify
+
+`posa server` è il prodotto vero: un solo server per tutti i negozi clienti, che installano
+l'app Shopify (cartella `shopify/`) e aggiungono il blocco "Prova nella tua stanza" alla
+pagina prodotto. Il cliente carica la foto dal sito del negozio e riceve il prima/dopo.
+
+```bash
+cp deploy/.env.example deploy/.env
+```
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Poi, per ogni negozio, registrazione e prima lettura del catalogo (istruzioni in
+`shopify/README.md`). Il servizio si installa con `pip install ".[server,segmentazione]"`:
+il gruppo `server` porta Pillow ≥ 13 e non va installato insieme a `demo`.
+
+Sicurezza: modello delle minacce, regole di esercizio e verifiche da ripetere a ogni
+rilascio in [docs/SICUREZZA.md](docs/SICUREZZA.md).
+
 ## Mettere i vostri rivestimenti nel catalogo
 
 Per ogni articolo servono le foto di **una singola piastrella o doga**: frontale, ritagliata
