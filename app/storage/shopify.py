@@ -48,7 +48,8 @@ USER_AGENT = "posa-catalogo/1.0 (+sincronizzazione catalogo rivestimenti)"
 PAGE_LIMIT = 250
 MAX_PAGES = 40
 IMAGE_WIDTH = 1200  # le foto si scaricano già ridotte dal CDN di Shopify
-MAX_IMAGES = 8  # foto esaminate per articolo
+MAX_IMAGES = 24  # foto esaminate per articolo (i decori possono averne una per figura)
+MAX_FIGURES = 16  # figure diverse di un articolo a decoro
 MAX_VARIANTS = 4  # facce diverse della stessa piastrella usate nella posa
 WORKERS = 8  # download in parallelo
 
@@ -62,7 +63,11 @@ SIZE_OPTION = re.compile(r"formato|dimension|misur|size|taglia", re.I)
 TEXTURE_ALT = re.compile(r"texture|render", re.I)
 # articoli fatti di figure diverse nella stessa confezione (cementine, decori, patchwork)
 MIX = re.compile(r"\bmix\b|decor|patchwork|composizion|assortit|misto|maiolic|cementin", re.I)
-RULES_VERSION = "3"  # cambia quando cambiano le regole: gli articoli vengono rielaborati
+RULES_VERSION = "4"
+# foto di ambientazione riconoscibili dal nome del file: non si scaricano nemmeno
+AMBIENT_NAME = re.compile(
+    r"ambient|ambiente|room|interior|lifestyle|setting|posat", re.I
+)  # cambia quando cambiano le regole: gli articoli vengono rielaborati
 HERRINGBONE = re.compile(r"spina di pesce|spina pesce|herringbone|chevron", re.I)
 # un articolo è un rivestimento se tipo, tag o titolo lo dicono (niente box doccia, colle...)
 TILE = re.compile(
@@ -522,19 +527,30 @@ def _build_article(
     rules = plan.rules
     flatten = not rules.hexagon
     textures: list[NDArray[np.uint8]] = []
+    from_sheets: list[NDArray[np.uint8]] = []  # figure ritagliate da fogli composizione
     hexagon_or_marked = plan.marked or rules.hexagon
+    limit = len(plan.images) if plan.marked else MAX_FIGURES if rules.mix else MAX_VARIANTS
     for k, image in enumerate(plan.images):
-        if len(textures) >= (len(plan.images) if plan.marked else 8 if rules.mix else MAX_VARIANTS):
+        if len(textures) >= limit:
             break
         pos = image.get("position", k + 1)
+        src = str(image.get("src", ""))
+        if not plan.marked and AMBIENT_NAME.search(src.rsplit("/", 1)[-1].split("?")[0]):
+            notes.append(f"foto {pos} ignorata: ambientazione (dal nome del file)")
+            continue
         try:
-            photo = load_photo(fetch(image_url(str(image.get("src", "")))))
+            photo = load_photo(fetch(image_url(src)))
             found, how = tile_textures(photo, rules, flatten)
         except Unusable as exc:
             notes.append(f"foto {pos} ignorata: {exc}")
             continue
         except (OSError, ValueError, urllib.error.URLError) as exc:
             notes.append(f"foto {pos} non scaricabile: {exc}")
+            continue
+        if how.startswith("composizione"):
+            # un foglio con tutte le figure: serve solo se mancano le foto delle singole
+            from_sheets.extend(found)
+            notes.append(f"foto {pos}: {how} (usata solo se mancano le foto singole)")
             continue
         keep = [
             t
@@ -545,7 +561,10 @@ def _build_article(
             notes.append(f"foto {pos} ignorata: colori diversi dalla prima (decoro o altro colore)")
             continue
         notes.append(f"foto {pos}: {how}")
-        textures = ci.distinct_tiles([*textures, *keep], limit=8 if rules.mix else MAX_VARIANTS)
+        textures = ci.distinct_tiles([*textures, *keep], limit=limit)
+    if len(textures) < 2 and from_sheets:
+        textures = ci.distinct_tiles([*textures, *from_sheets], limit=limit)
+        notes.append(f"figure prese dai fogli composizione: {len(textures)}")
     if not textures:
         notes.append(
             "nessuna foto utilizzabile: scrivi 'texture' nel testo alternativo della foto "
