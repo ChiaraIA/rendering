@@ -317,6 +317,64 @@ def aggiungi_materiale(
 
 
 @app.command()
+def shopify(
+    negozio: Annotated[
+        str | None,
+        typer.Option(
+            "--negozio",
+            help="Indirizzo del negozio, es. mio-negozio.myshopify.com o www.miosito.it "
+            "(oppure POSA_SHOPIFY_NEGOZIO; se omesso, l'ultimo usato)",
+        ),
+    ] = None,
+    collezione: Annotated[
+        str | None,
+        typer.Option("--collezione", help="Solo gli articoli di questa collezione (handle)"),
+    ] = None,
+) -> None:
+    """Importa nel catalogo gli articoli in vendita sul negozio Shopify, con le loro foto."""
+    from app.catalog.loader import shop_catalog_dir
+    from app.storage import shopify as shop
+
+    out = shop_catalog_dir()
+    saved_store, saved_coll = shop.configured_store(out)
+    store = negozio or saved_store
+    if not store:
+        typer.secho(
+            "Indica il negozio: posa shopify --negozio mio-negozio.myshopify.com",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    try:
+        report = shop.sync(store, out, collezione or saved_coll, log=typer.echo)
+    except Exception as exc:  # rete, negozio inesistente, elenco disattivato
+        typer.secho(f"Sincronizzazione non riuscita: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(shop.format_report(report))
+    typer.echo(f"\nCatalogo del negozio: {out / 'catalog.json'}")
+
+
+def _sync_shop_at_start() -> None:
+    """All'avvio di `posa web`: se c'è un negozio configurato, aggiorna il catalogo."""
+    from app.catalog.loader import shop_catalog_dir
+    from app.storage import shopify as shop
+
+    store, coll = shop.configured_store(shop_catalog_dir())
+    if not store:
+        return
+    typer.echo(f"Aggiorno il catalogo dal negozio {store}…")
+    try:
+        report = shop.sync(store, shop_catalog_dir(), coll)
+        typer.echo(report.summary())
+    except Exception as exc:
+        typer.secho(
+            f"Catalogo del negozio non aggiornato ({exc}): uso l'ultima copia.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
+@app.command()
 def web(
     port: Annotated[int, typer.Option(help="Porta")] = 7860,
     share: Annotated[bool, typer.Option(help="Link pubblico temporaneo (Gradio)")] = False,
@@ -347,6 +405,7 @@ def web(
             fg=typer.colors.YELLOW,
             err=True,
         )
+    _sync_shop_at_start()
     build_app().queue().launch(server_name="0.0.0.0", server_port=free, share=share, css=CSS)
 
 

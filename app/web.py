@@ -59,9 +59,35 @@ def _example_photo() -> str:
     return str(path)
 
 
+def _choices(cat: Catalog) -> list[tuple[str, str]]:
+    return [(f"{m.name} ({m.id})", m.id) for m in cat.materials] + [(NONE_CHOICE, "")]
+
+
+def _sync_shop() -> tuple[str, Catalog]:
+    """Riscarica gli articoli dal negozio Shopify e ricarica il catalogo."""
+    from app.catalog.loader import shop_catalog_dir
+    from app.storage import shopify as shop
+
+    store, coll = shop.configured_store(shop_catalog_dir())
+    if not store:
+        msg = (
+            "⚠️ Nessun negozio configurato: avvia una volta `posa shopify --negozio "
+            "mio-negozio.myshopify.com` (oppure imposta POSA_SHOPIFY_NEGOZIO)."
+        )
+        return msg, Catalog.load()
+    try:
+        report = shop.sync(store, shop_catalog_dir(), coll)
+    except Exception as exc:
+        msg = f"❌ Negozio non raggiungibile ({exc}): resta il catalogo precedente."
+        return msg, Catalog.load()
+    detail = shop.format_report(report).replace("\n", "  \n")
+    return f"✅ {detail}", Catalog.load()
+
+
 def build_app(catalog: Catalog | None = None) -> gr.Blocks:
-    cat = catalog or Catalog.load()
-    choices = [(f"{m.name} ({m.id})", m.id) for m in cat.materials] + [(NONE_CHOICE, "")]
+    holder = {"cat": catalog or Catalog.load()}  # il catalogo cambia con "Aggiorna dal negozio"
+    cat = holder["cat"]
+    choices = _choices(cat)
 
     async def run(photo: str | None, material_id: str, sample: str | None, room: str):
         if problem := credentials_problem():
@@ -95,7 +121,7 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
         sample_path = Path(sample) if sample else None
         ws = start(Path(photo), out_dir, material_id or None, sample_path, room_m, listener=push)
         lines: list[str] = []
-        task = asyncio.create_task(run_job(ws, cat))
+        task = asyncio.create_task(run_job(ws, holder["cat"]))
         status = "⏳ Gli agenti sono al lavoro…"
         while not task.done() or not queue.empty():
             with contextlib.suppress(TimeoutError):
@@ -146,14 +172,17 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                     value=cat.materials[0].id,
                     label="2 · Rivestimento dal catalogo",
                 )
-                gr.Gallery(
+                gallery = gr.Gallery(
                     value=_catalog_gallery(cat),
                     label="Catalogo",
-                    columns=4,
-                    height=230,
+                    columns=5,
+                    height=300,
                     object_fit="contain",  # niente ritaglio: gli esagoni restano interi
                     allow_preview=False,
                 )
+                with gr.Row():
+                    refresh = gr.Button("🔄 Aggiorna dal negozio Shopify", size="sm")
+                shop_status = gr.Markdown(visible=False)
                 sample = gr.File(
                     label="…oppure la foto di un campione visto in negozio",
                     type="filepath",
@@ -185,6 +214,18 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                     file_count="multiple",
                 )
         example.click(lambda: _example_photo(), outputs=photo).then(lambda: "4.2x3.6", outputs=room)
+
+        async def refresh_shop():
+            msg, new_cat = await asyncio.to_thread(_sync_shop)
+            holder["cat"] = new_cat
+            first = new_cat.materials[0].id if new_cat.materials else ""
+            return (
+                gr.update(choices=_choices(new_cat), value=first),
+                _catalog_gallery(new_cat),
+                gr.update(value=msg, visible=True),
+            )
+
+        refresh.click(refresh_shop, outputs=[material, gallery, shop_status])
         go.click(
             run, inputs=[photo, material, sample, room], outputs=[status, log, slider, work, files]
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,11 @@ from app.core.ingest import readonly, sha256_bytes
 from app.core.models import MaterialSpec, TextureVariant
 
 DEFAULT_CATALOG = Path(__file__).parent / "data" / "catalog.json"
+
+
+def shop_catalog_dir() -> Path:
+    """Cartella del catalogo sincronizzato dal negozio Shopify (`posa shopify`)."""
+    return Path(os.environ.get("POSA_SHOPIFY_DIR", "catalogo_shopify"))
 
 
 SCHEMA_VERSION = "2.0"
@@ -34,10 +40,29 @@ class Catalog:
         self.doc = doc
         self.sha256 = sha256
         self._by_id = {m.id: m for m in doc.materials}
+        self._roots = {m.id: self.root for m in doc.materials}  # cartella delle texture
 
     @classmethod
     def load(cls, path: Path | None = None) -> Catalog:
-        path = Path(path or DEFAULT_CATALOG)
+        """Senza `path`: catalogo della repo + quello del negozio Shopify, se sincronizzato."""
+        if path is not None:
+            return cls._load_file(Path(path))
+        main = cls._load_file(DEFAULT_CATALOG)
+        shop = shop_catalog_dir() / "catalog.json"
+        return main.merged(cls._load_file(shop)) if shop.is_file() else main
+
+    def merged(self, other: Catalog) -> Catalog:
+        """Catalogo unico: ogni articolo continua a leggere le texture dalla propria cartella."""
+        clash = set(self._by_id) & set(other._by_id)
+        if clash:
+            raise CatalogError(f"codici articolo presenti in due cataloghi: {sorted(clash)}")
+        doc = CatalogFile(schema_version="2.0", materials=self.materials + other.materials)
+        out = Catalog(self.path, doc, sha256_bytes((self.sha256 + other.sha256).encode()))
+        out._roots = {**self._roots, **other._roots}
+        return out
+
+    @classmethod
+    def _load_file(cls, path: Path) -> Catalog:
         if not path.is_file():
             raise CatalogError(f"catalogo non trovato: {path}")
         raw = path.read_bytes()
@@ -65,7 +90,7 @@ class Catalog:
         return [self._load_texture(spec.id, v) for v in spec.variants]
 
     def _load_texture(self, material_id: str, variant: TextureVariant) -> NDArray[np.uint8]:
-        path = self.root / "textures" / variant.texture_file
+        path = self._roots.get(material_id, self.root) / "textures" / variant.texture_file
         if not path.is_file():
             raise CatalogError(f"texture mancante per {material_id}: {path.name}")
         data = path.read_bytes()

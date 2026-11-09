@@ -153,6 +153,54 @@ dove il pavimento tocca gli oggetti, e boccia ombre mancanti o esagerate, "fanta
 vecchio pavimento, riflessi incoerenti con la finitura o un pavimento più acceso della
 stanza. `esegui_posa` parte solo con luci approvate.
 
+## Catalogo dal negozio Shopify
+
+Gli articoli in vendita sul vostro negozio Shopify diventano rivestimenti da provare, con
+le foto che caricate sulle pagine prodotto. Non serve nessuna chiave: il programma legge
+l'elenco pubblico degli articoli (`https://<negozio>/products.json`).
+
+```bash
+posa shopify --negozio mio-negozio.myshopify.com
+```
+
+Va bene anche il dominio del sito (`www.miosito.it`). Il negozio viene ricordato: da quel
+momento **ogni avvio di `posa web` riscarica il catalogo**, e nella pagina c'è il pulsante
+**"Aggiorna dal negozio Shopify"** per farlo senza riavviare. Gli articoli non cambiati non
+vengono riscaricati; quelli tolti dal negozio spariscono dal catalogo. Per limitarsi a una
+collezione: `--collezione pavimenti` (l'handle della collezione).
+
+**Quale foto viene usata.** Il modo più sicuro: su Shopify, nel **testo alternativo** della
+foto della singola piastrella, scrivete `texture`. Senza questa indicazione il programma
+sceglie da solo:
+- la foto in cui riconosce **una piastrella su sfondo uniforme** (anche un po' storta: viene
+  raddrizzata);
+- oppure la **prima foto**, se è la superficie della piastrella a tutto campo;
+- le **ambientazioni** vengono scartate.
+
+Ogni **variante con una foto propria** (es. i colori) diventa un articolo a sé. Più foto
+`texture` sullo stesso articolo (o il tag `misto`) = piastrelle diverse mescolate nella posa,
+come le cementine.
+
+**Regole di posa.** Il formato si legge dal titolo (`Gres 60x60`, `Rovere 20x120`,
+`Esagona 25 cm`) o dall'opzione "Formato" della variante. Il resto ha valori ragionevoli
+per tipo: legno e laminato sfalsati e senza fuga, esagoni per i titoli con "esagona",
+fuga di 2-3 mm per le piastrelle, finitura lucida se nel testo c'è "lucido", "lappato" o
+"levigato". Per cambiarli si usano i **tag** dell'articolo su Shopify:
+
+| Tag | Esempio | Cosa fa |
+|---|---|---|
+| `formato:` | `formato:60x60` | misura in cm (per gli esagoni: punta-punta) |
+| `fuga:` | `fuga:2` | larghezza della fuga in mm (`fuga:0` = senza fuga) |
+| `colore-fuga:` | `colore-fuga:#cfccc5` | colore della fuga (altrimenti in tinta con la piastrella) |
+| `posa:` | `posa:running_bond` | `grid`, `running_bond` (sfalsata) o `esagoni` |
+| `sfalsamento:` | `sfalsamento:0.33` | sfalsamento della posa a correre |
+| `rotazione:` | `rotazione:45` | posa in diagonale |
+| `finitura:` | `finitura:satinata` | `opaca`, `satinata` o `lucida` (riflessi) |
+| `render:no` | | esclude l'articolo (colle, accessori…) |
+
+`posa shopify` stampa per ogni articolo cosa ha fatto: foto usate e scartate, valori presi
+per buoni e cosa aggiungere quando un articolo non si può posare.
+
 ## Mettere i vostri rivestimenti nel catalogo
 
 Per ogni articolo servono le foto di **una singola piastrella o doga**: frontale, ritagliata

@@ -19,6 +19,14 @@ def _no_segmentation_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSA_SEGMENTAZIONE", "0")
 
 
+@pytest.fixture(autouse=True)
+def _no_shop_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """I test non leggono il catalogo Shopify eventualmente sincronizzato in locale."""
+    monkeypatch.setenv("POSA_SHOPIFY_DIR", str(tmp_path_factory.mktemp("negozio-vuoto")))
+
+
 @pytest.fixture(scope="session")
 def catalog(tmp_path_factory: pytest.TempPathFactory) -> Catalog:
     """Catalogo di sola lettura condiviso; i test che lo alterano ne creano uno proprio."""

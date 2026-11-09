@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -139,6 +140,23 @@ def _catalog() -> Check:
     return Check("Catalogo", "ok", f"{len(cat.materials)} articoli, texture verificate")
 
 
+def _shop() -> Check:
+    from app.catalog.loader import shop_catalog_dir
+    from app.storage.shopify import configured_store
+
+    store, _ = configured_store(shop_catalog_dir())
+    if not store:
+        return Check(
+            "Negozio Shopify",
+            "ok",
+            "non collegato (facoltativo)",
+            "per usare le foto del negozio: posa shopify --negozio mio-negozio.myshopify.com",
+        )
+    path = shop_catalog_dir() / "catalog.json"
+    n = len(json.loads(path.read_text())["materials"]) if path.is_file() else 0
+    return Check("Negozio Shopify", "ok", f"{store}: {n} articoli importati")
+
+
 def _credentials() -> Check:
     problem = credentials_problem()
     if problem is None:
@@ -157,6 +175,7 @@ def offline_checks() -> list[Check]:
         _module("Interfaccia web (Gradio)", "gradio"),
         _agent_cli(),
         _catalog(),
+        _shop(),
         _segmentation(),
         _credentials(),
     ]

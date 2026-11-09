@@ -37,8 +37,16 @@ def rectify_tile(
     src: Path, corners: str, w_cm: float, h_cm: float, dst: Path, flatten: bool = True
 ) -> None:
     """Raddrizza la faccia della piastrella fotografata in prospettiva (vista frontale)."""
-    pts = parse_points(corners, 4).astype(np.float32)
     img = ingest.load_image(src).pixels[..., :3]
+    tex = warp_quad(img, parse_points(corners, 4), w_cm, h_cm, flatten)
+    Image.fromarray(np.ascontiguousarray(tex)).save(dst, format="PNG")
+
+
+def warp_quad(
+    img: NDArray[np.uint8], corners: NDArray[np.float64], w_cm: float, h_cm: float, flatten: bool
+) -> NDArray[np.uint8]:
+    """4 angoli della piastrella (alto-sx, alto-dx, basso-dx, basso-sx) -> texture frontale."""
+    pts = np.asarray(corners, dtype=np.float32)
     scale = min(1024 / w_cm, 1024 / h_cm, 30.0)  # px per cm, lato massimo 1024 px
     out_w, out_h = round(w_cm * scale), round(h_cm * scale)
     target = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
@@ -54,9 +62,90 @@ def rectify_tile(
     flat = flat[inset:-inset, inset:-inset]
     if flatten:
         flat = flatten_lighting(flat)
-    Image.fromarray(np.ascontiguousarray(flat)).resize(
+    out = Image.fromarray(np.ascontiguousarray(flat)).resize(
         (out_w, out_h), Image.Resampling.LANCZOS
-    ).save(dst, format="PNG")
+    )
+    return np.asarray(out, dtype=np.uint8)
+
+
+def crop_to_aspect(
+    img: NDArray[np.uint8], w_cm: float, h_cm: float, flatten: bool
+) -> NDArray[np.uint8]:
+    """Foto che è già la superficie della piastrella (senza sfondo): ritaglio centrale."""
+    h, w = img.shape[:2]
+    target = w_cm / h_cm
+    if w / h > target:
+        cw, ch = round(h * target), h
+    else:
+        cw, ch = w, round(w / target)
+    x0, y0 = (w - cw) // 2, (h - ch) // 2
+    crop = np.ascontiguousarray(img[y0 : y0 + ch, x0 : x0 + cw, :3])
+    if flatten:
+        crop = flatten_lighting(crop)
+    scale = min(1.0, 1024 / max(cw, ch))
+    out = Image.fromarray(crop).resize(
+        (max(1, round(cw * scale)), max(1, round(ch * scale))), Image.Resampling.LANCZOS
+    )
+    return np.asarray(out, dtype=np.uint8)
+
+
+def _foreground(img: NDArray[np.uint8]) -> tuple[NDArray[np.uint8], bool]:
+    """Sagoma dell'oggetto su sfondo uniforme; False se i bordi della foto non sono uno sfondo."""
+    rgb = img[..., :3].astype(np.int32)
+    border = np.concatenate([rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]])
+    bg = np.median(border, axis=0)
+    uniform = float(np.mean(np.abs(border - bg).sum(axis=1) < 30)) > 0.85
+    diff = np.abs(rgb - bg).sum(axis=2)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+    fg = ((diff > 30) | (sat > 14)).astype(np.uint8) * 255
+    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    return fg, uniform
+
+
+def detect_quad(img: NDArray[np.uint8]) -> NDArray[np.float64] | None:
+    """4 angoli di una piastrella rettangolare fotografata su sfondo uniforme (foto prodotto).
+
+    None se la foto non ha uno sfondo uniforme (es. è già la superficie, o un'ambientazione)
+    o se la sagoma non è un quadrilatero. Ordine: alto-sx, alto-dx, basso-dx, basso-sx.
+    """
+    fg, uniform = _foreground(img)
+    if not uniform:
+        return None
+    cnts, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cnts:
+        return None
+    big = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(big) / (img.shape[0] * img.shape[1])
+    if not 0.08 < area < 0.97:
+        return None
+    hull = cv2.convexHull(big)
+    if cv2.contourArea(big) < 0.93 * cv2.contourArea(hull):
+        return None  # sagoma irregolare: non è una piastrella sola
+    peri = cv2.arcLength(hull, True)
+    for eps in np.linspace(0.005, 0.06, 45):
+        approx = cv2.approxPolyDP(hull, eps * peri, True)
+        if len(approx) == 4:
+            poly = approx[:, 0, :].astype(np.float64)
+            break
+    else:
+        return None
+    c = poly.mean(axis=0)
+    ang = np.arctan2(poly[:, 1] - c[1], poly[:, 0] - c[0])
+    poly = poly[np.argsort(ang)]  # da -pi: alto-sx, alto-dx, basso-dx, basso-sx
+    start = int(np.argmin(poly.sum(axis=1)))
+    poly = np.roll(poly, -start, axis=0)
+    return _refine_corners(poly, hull[:, 0, :].astype(np.float64))
+
+
+def looks_like_surface(img: NDArray[np.uint8]) -> bool:
+    """Una foto "a tutta superficie" di piastrella è omogenea; un'ambientazione no
+    (pareti, mobili e pavimento hanno colori molto diversi tra una zona e l'altra)."""
+    small = cv2.resize(np.ascontiguousarray(img[..., :3]), (90, 90), interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(small, cv2.COLOR_RGB2LAB).astype(np.float32)
+    blocks = lab.reshape(3, 30, 3, 30, 3).mean(axis=(1, 3)).reshape(-1, 3)
+    d = np.linalg.norm(blocks[:, None] - blocks[None], axis=-1)
+    return float(d.max()) <= 40.0
 
 
 # ------------------------------------------------------------------- esagoni
@@ -116,8 +205,9 @@ def _refine_corners(poly: NDArray[np.float64], outline: NDArray[np.float64]) -> 
         dense.append(a + (b - a) * np.linspace(0, 1, n, endpoint=False)[:, None])
     pts = np.concatenate(dense)
     lines = []
-    for k in range(6):
-        a, b = poly[k], poly[(k + 1) % 6]
+    n_sides = len(poly)
+    for k in range(n_sides):
+        a, b = poly[k], poly[(k + 1) % n_sides]
         d = b - a
         length = float(np.hypot(*d))
         t = ((pts - a) @ d) / (length**2)
@@ -129,7 +219,7 @@ def _refine_corners(poly: NDArray[np.float64], outline: NDArray[np.float64]) -> 
         vx, vy, x0, y0 = cv2.fitLine(sel.astype(np.float32), cv2.DIST_HUBER, 0, 0.01, 0.01)[:, 0]
         lines.append((np.array([x0, y0], np.float64), np.array([vx, vy], np.float64)))
     out = np.empty_like(poly)
-    for k in range(6):  # il vertice k sta tra il lato k-1 e il lato k
+    for k in range(n_sides):  # il vertice k sta tra il lato k-1 e il lato k
         (p1, d1), (p2, d2) = lines[k - 1], lines[k]
         m = np.array([d1, -d2]).T
         if abs(np.linalg.det(m)) < 1e-9:
@@ -184,6 +274,19 @@ def rectify_hexagon(
     """
     img = ingest.load_image(src).pixels[..., :3]
     found = parse_points(vertices, 6) if vertices else detect_hexagon(img)
+    tex = hexagon_texture(img, found, radius_px, flatten, inset, gains)
+    Image.fromarray(np.ascontiguousarray(tex)).save(dst, format="PNG")
+
+
+def hexagon_texture(
+    img: NDArray[np.uint8],
+    found: NDArray[np.float64],
+    radius_px: int = 512,
+    flatten: bool = False,
+    inset: float = 0.015,
+    gains: tuple[float, float, float] | None = None,
+) -> NDArray[np.uint8]:
+    """6 vertici dell'esagono nella foto -> texture frontale con gli angoli riempiti."""
     w, h = 2 * radius_px, round(SQRT3 * radius_px)
     # i vertici trovati vanno su un esagono ideale appena più grande: smusso e sfondo
     # restano fuori dalla texture
@@ -204,4 +307,4 @@ def rectify_hexagon(
         tex = flatten_lighting(tex)
     if gains:
         tex = apply_gains(tex, gains)
-    Image.fromarray(np.ascontiguousarray(tex)).save(dst, format="PNG")
+    return tex
