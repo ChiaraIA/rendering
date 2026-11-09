@@ -318,3 +318,32 @@ def test_joint_lines_tell_compositions_from_single_tiles() -> None:
     grooves = tile.copy()
     grooves[::12] = 40  # rigatura fitta (rilievo): non sono fughe
     assert not has_joint_lines(grooves)
+
+
+def test_composition_photo_is_split_into_figures_and_printed_grids_stay_whole() -> None:
+    from app.storage import catalog_import as ci
+
+    a = synthetic.make_tile_texture(200, (180, 90, 70), seed=21)
+    b = synthetic.make_tile_texture(200, (70, 110, 160), seed=22)
+    # composizione 2x2 di piastrelle 20x20 (due figure) con fughe chiare
+    comp = np.concatenate([np.concatenate([a, b], 1), np.concatenate([b, a], 1)], 0).copy()
+    comp[198:202, :] = 235
+    comp[:, 198:202] = 235
+    rules = shop.product_rules({"title": "Cementina Decoro Mix 20x20"}, None)
+    assert not isinstance(rules, str) and rules.mix
+    figures, how = shop.tile_textures(comp, rules, False)
+    assert len(figures) == 2 and "composizione di 4" in how
+    # piastrella 50x20 con un disegno a riquadri quadrati stampato: resta intera
+    squares = [synthetic.make_tile_texture(100, (120 + 20 * k, 120, 120), seed=k) for k in range(5)]
+    printed = np.concatenate(
+        [np.concatenate(squares, 1), np.concatenate(squares[::-1], 1)], 0
+    ).copy()
+    for x in range(100, 500, 100):
+        printed[:, x - 1 : x + 1] = 230
+    printed[99:101, :] = 230
+    r50 = shop.product_rules({"title": "Maiolica Patchwork 20x50"}, None)
+    assert not isinstance(r50, str)
+    figures, how = shop.tile_textures(printed, r50, False)
+    assert len(figures) == 1 and "riquadri" in how
+    assert figures[0].shape[1] > 2 * figures[0].shape[0]  # 50x20 intera
+    assert len(ci.distinct_tiles([a, a.copy(), b])) == 2  # le copie si tolgono

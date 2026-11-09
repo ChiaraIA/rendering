@@ -60,6 +60,9 @@ SIZE = re.compile(r"(\d+(?:[.,]\d+)?)\s*[x×X*]\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)?",
 ONE_SIZE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(mm|cm)\b", re.I)
 SIZE_OPTION = re.compile(r"formato|dimension|misur|size|taglia", re.I)
 TEXTURE_ALT = re.compile(r"texture|render", re.I)
+# articoli fatti di figure diverse nella stessa confezione (cementine, decori, patchwork)
+MIX = re.compile(r"\bmix\b|decor|patchwork|composizion|assortit|misto|maiolic|cementin", re.I)
+RULES_VERSION = "3"  # cambia quando cambiano le regole: gli articoli vengono rielaborati
 HERRINGBONE = re.compile(r"spina di pesce|spina pesce|herringbone|chevron", re.I)
 # un articolo è un rivestimento se tipo, tag o titolo lo dicono (niente box doccia, colle...)
 TILE = re.compile(
@@ -208,6 +211,7 @@ class Rules:
     notes: list[str] = field(default_factory=list)
     uses: list[str] = field(default_factory=lambda: ["pavimento", "rivestimento"])
     wood: bool = False
+    mix: bool = False  # figure diverse nella stessa confezione: colori diversi ammessi
 
     @property
     def hexagon(self) -> bool:
@@ -300,7 +304,8 @@ def product_rules(product: dict[str, Any], size_text: str | None) -> Rules | str
         for u, key in (("pavimento", "pavimento"), ("rivestimento", "rivestimento"))
         if any(v.lower() == key for v in tv.get("utilizzo", []))
     ] or ["pavimento", "rivestimento"]
-    return Rules(w_cm, h_cm, pattern, bond, rotation, joint, color, finish, notes, uses, wood)
+    mix = bool(MIX.search(words))
+    return Rules(w_cm, h_cm, pattern, bond, rotation, joint, color, finish, notes, uses, wood, mix)
 
 
 # ------------------------------------------------------------------------- foto
@@ -315,36 +320,67 @@ def load_photo(data: bytes) -> NDArray[np.uint8]:
     return np.asarray(img.convert("RGB"), dtype=np.uint8)
 
 
-def tile_texture(
-    img: NDArray[np.uint8], rules: Rules, may_be_surface: bool, flatten: bool
-) -> tuple[NDArray[np.uint8], str]:
-    """Texture frontale della piastrella da una foto prodotto, e come è stata ottenuta."""
+def tile_textures(
+    img: NDArray[np.uint8], rules: Rules, flatten: bool
+) -> tuple[list[NDArray[np.uint8]], str]:
+    """Texture frontali delle piastrelle in una foto prodotto, e come sono state ottenute.
+
+    Più di una quando la foto è una composizione di piastrelle affiancate (figure diverse
+    della stessa confezione): vengono ritagliate una per una, senza doppioni.
+    """
     if rules.hexagon:
         try:
             vertices = ci.detect_hexagon(img)
         except ValueError as exc:
             raise Unusable(f"esagono non riconosciuto ({exc})") from exc
-        return ci.hexagon_texture(img, vertices, flatten=flatten), "esagono su sfondo raddrizzato"
+        tex = ci.hexagon_texture(img, vertices, flatten=flatten)
+        return [tex], "esagono su sfondo raddrizzato"
     quad = ci.detect_quad(img)
     if quad is not None:
-        return ci.warp_quad(img, quad, rules.w_cm, rules.h_cm, flatten), "piastrella su sfondo"
-    if not may_be_surface:
-        raise Unusable("non è una piastrella su sfondo uniforme (ambientazione?)")
+        tex = ci.warp_quad(img, quad, rules.w_cm, rules.h_cm, flatten)
+        return [tex], "piastrella su sfondo"
     h, w = img.shape[:2]
     tile = rules.w_cm / rules.h_cm
-    if abs((h / w) / tile - 1) < abs((w / h) / tile - 1):  # foto in verticale
-        img = np.ascontiguousarray(np.rot90(img))
+
+    def fits(width: float, height: float, tol: float) -> bool:
+        return min(abs((width / height) / tile - 1), abs((height / width) / tile - 1)) <= tol
+
+    cells = ci.grid_cells(img) if not rules.wood else None
+    if cells and len(cells) > 1:
+        cw = float(np.median([c[3] - c[2] for c in cells]))
+        ch = float(np.median([c[1] - c[0] for c in cells]))
+        if fits(cw, ch, 0.15):  # celle grandi come la piastrella: piastrelle vere affiancate
+            if not ci.looks_like_surface(img) and not rules.mix:
+                raise Unusable("sembra un'ambientazione, non una composizione di piastrelle")
+            texs = []
+            for y0, y1, x0, x1 in cells:
+                iy, ix = round(0.05 * (y1 - y0)), round(0.05 * (x1 - x0))  # via la fuga
+                cell = np.ascontiguousarray(img[y0 + iy : y1 - iy, x0 + ix : x1 - ix])
+                if (cell.shape[0] > cell.shape[1]) != (rules.h_cm > rules.w_cm) and tile != 1:
+                    cell = np.ascontiguousarray(np.rot90(cell))
+                texs.append(ci.crop_to_aspect(cell, rules.w_cm, rules.h_cm, flatten))
+            figures = ci.distinct_tiles(texs)
+            return (
+                figures,
+                f"composizione di {len(cells)} piastrelle, {len(figures)} figure diverse",
+            )
+        # celle di forma diversa dalla piastrella: disegno a riquadri stampato su una sola
+    if abs((h / w) / tile - 1) < abs((w / h) / tile - 1):
+        img = np.ascontiguousarray(np.rot90(img))  # foto in verticale
         h, w = w, h
     if abs((w / h) / tile - 1) > 0.12:
         raise Unusable(
             f"proporzioni {w}x{h} diverse dal formato {rules.w_cm:g}x{rules.h_cm:g}: "
             "composizione o ambientazione"
         )
-    if not ci.looks_like_surface(img):
+    exact = abs((w / h) / tile - 1) < 0.04 and abs(tile - 1) > 0.15
+    # decori e cementine hanno colori molto diversi tra una zona e l'altra della piastrella
+    if not exact and not ci.looks_like_surface(img, 65.0 if rules.mix else 40.0):
         raise Unusable("sembra un'ambientazione, non la superficie della piastrella")
-    if not rules.wood and ci.has_joint_lines(img):
+    if not cells and not rules.wood and ci.has_joint_lines(img):
         raise Unusable("si vedono fughe: sono più piastrelle o un'ambientazione")
-    return ci.crop_to_aspect(img, rules.w_cm, rules.h_cm, flatten), "superficie della piastrella"
+    how = "piastrella con disegno a riquadri" if cells else "superficie della piastrella"
+    return [ci.crop_to_aspect(img, rules.w_cm, rules.h_cm, flatten)], how
 
 
 def _same_family(a: NDArray[np.uint8], b: NDArray[np.uint8]) -> bool:
@@ -471,6 +507,7 @@ def _fingerprint(product: dict[str, Any]) -> str:
     keys = ("title", "handle", "tags", "product_type", "options", "body_html")
     data = {k: product.get(k) for k in keys}
     data["images"] = [(i.get("id"), i.get("src"), i.get("alt")) for i in product.get("images", [])]
+    data["rules_version"] = RULES_VERSION
     data["variants"] = [
         (v.get("id"), v.get("image_id"), v.get("option1"), v.get("option2"), v.get("option3"))
         for v in product.get("variants", [])
@@ -487,23 +524,28 @@ def _build_article(
     textures: list[NDArray[np.uint8]] = []
     hexagon_or_marked = plan.marked or rules.hexagon
     for k, image in enumerate(plan.images):
-        if len(textures) >= (len(plan.images) if plan.marked else MAX_VARIANTS):
+        if len(textures) >= (len(plan.images) if plan.marked else 8 if rules.mix else MAX_VARIANTS):
             break
         pos = image.get("position", k + 1)
         try:
             photo = load_photo(fetch(image_url(str(image.get("src", "")))))
-            tex, how = tile_texture(photo, rules, True, flatten)
+            found, how = tile_textures(photo, rules, flatten)
         except Unusable as exc:
             notes.append(f"foto {pos} ignorata: {exc}")
             continue
         except (OSError, ValueError, urllib.error.URLError) as exc:
             notes.append(f"foto {pos} non scaricabile: {exc}")
             continue
-        if textures and not hexagon_or_marked and not _same_family(textures[0], tex):
+        keep = [
+            t
+            for t in found
+            if not textures or hexagon_or_marked or rules.mix or _same_family(textures[0], t)
+        ]
+        if not keep:
             notes.append(f"foto {pos} ignorata: colori diversi dalla prima (decoro o altro colore)")
             continue
         notes.append(f"foto {pos}: {how}")
-        textures.append(tex)
+        textures = ci.distinct_tiles([*textures, *keep], limit=8 if rules.mix else MAX_VARIANTS)
     if not textures:
         notes.append(
             "nessuna foto utilizzabile: scrivi 'texture' nel testo alternativo della foto "
@@ -513,9 +555,12 @@ def _build_article(
     variants = []
     for k, tex in enumerate(textures):
         buf = io.BytesIO()
-        Image.fromarray(np.ascontiguousarray(tex)).save(buf, format="PNG")
+        # JPEG 4:4:4 di alta qualità: invisibile sulla texture, 5 volte più leggero del PNG
+        Image.fromarray(np.ascontiguousarray(tex)).save(
+            buf, format="JPEG", quality=94, subsampling=0, optimize=True
+        )
         data = buf.getvalue()
-        name = f"{plan.article_id}-v{k + 1}.png"
+        name = f"{plan.article_id}-v{k + 1}.jpg"
         (tex_dir / name).write_bytes(data)
         variants.append({"texture_file": name, "texture_sha256": sha256_bytes(data)})
     if rules.hexagon:
@@ -656,7 +701,7 @@ def sync(
 
     report.removed = sorted(set(old_catalog) - {m["id"] for m in materials})
     used = {v["texture_file"] for m in materials for v in m["variants"]}
-    for f in tex_dir.glob("*.png"):
+    for f in [*tex_dir.glob("*.png"), *tex_dir.glob("*.jpg")]:
         if f.name not in used:
             f.unlink()
     doc = {"schema_version": "2.0", "materials": materials}

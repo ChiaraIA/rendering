@@ -138,14 +138,14 @@ def detect_quad(img: NDArray[np.uint8]) -> NDArray[np.float64] | None:
     return _refine_corners(poly, hull[:, 0, :].astype(np.float64))
 
 
-def looks_like_surface(img: NDArray[np.uint8]) -> bool:
+def looks_like_surface(img: NDArray[np.uint8], max_delta: float = 40.0) -> bool:
     """Una foto "a tutta superficie" di piastrella è omogenea; un'ambientazione no
     (pareti, mobili e pavimento hanno colori molto diversi tra una zona e l'altra)."""
     small = cv2.resize(np.ascontiguousarray(img[..., :3]), (90, 90), interpolation=cv2.INTER_AREA)
     lab = cv2.cvtColor(small, cv2.COLOR_RGB2LAB).astype(np.float32)
     blocks = lab.reshape(3, 30, 3, 30, 3).mean(axis=(1, 3)).reshape(-1, 3)
     d = np.linalg.norm(blocks[:, None] - blocks[None], axis=-1)
-    return float(d.max()) <= 40.0
+    return float(d.max()) <= max_delta
 
 
 # ------------------------------------------------------------------- esagoni
@@ -322,7 +322,7 @@ def _line_peaks(profile: NDArray[np.float32]) -> list[int]:
     peaks: list[int] = []
     for i in range(1, n - 1):
         if a[i] > thr and a[i] >= a[i - 1] and a[i] >= a[i + 1]:
-            if peaks and i - peaks[-1] < 4:
+            if peaks and i - peaks[-1] < max(4, int(0.015 * n)):  # i due bordi di una fuga
                 if a[i] > a[peaks[-1]]:
                     peaks[-1] = i
                 continue
@@ -372,3 +372,57 @@ def has_joint_lines(img: NDArray[np.uint8]) -> bool:
     rows_ok = _consistent(g, rows) if len(rows) <= 7 else rows
     cols_ok = _consistent(g.T, cols) if len(cols) <= 7 else cols
     return _regular_joints(rows_ok, g.shape[0]) or _regular_joints(cols_ok, g.shape[1])
+
+
+def grid_cells(img: NDArray[np.uint8]) -> list[tuple[int, int, int, int]] | None:
+    """Celle (y0, y1, x0, x1) di una griglia regolare che attraversa tutta la foto: più
+    piastrelle affiancate, oppure un disegno a riquadri stampato su una piastrella sola.
+    None se la foto non ha una griglia."""
+    g = cv2.cvtColor(np.ascontiguousarray(img[..., :3]), cv2.COLOR_RGB2GRAY)
+    h, w = g.shape
+    scale = 512 / max(h, w)
+    small = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA).astype(np.float32)
+    rows = _line_peaks(small.mean(axis=1))
+    cols = _line_peaks(small.mean(axis=0))
+    rows = _consistent(small, rows) if len(rows) <= 7 else []
+    cols = _consistent(small.T, cols) if len(cols) <= 7 else []
+    if not (_regular_joints(rows, small.shape[0]) or _regular_joints(cols, small.shape[1])):
+        return None
+
+    def bounds(peaks: list[int], n_small: int, n: int) -> list[int] | None:
+        b = [0, *[round(p / scale) for p in peaks], n]
+        gaps = np.diff(b)
+        if gaps.min() <= 0 or gaps.max() / gaps.min() > 1.35:
+            return None  # griglia irregolare (bordo tagliato, ambientazione)
+        return b
+
+    ys = bounds(rows if _regular_joints(rows, small.shape[0]) else [], small.shape[0], h)
+    xs = bounds(cols if _regular_joints(cols, small.shape[1]) else [], small.shape[1], w)
+    if ys is None or xs is None:
+        return None
+    return [
+        (ys[i], ys[i + 1], xs[j], xs[j + 1]) for i in range(len(ys) - 1) for j in range(len(xs) - 1)
+    ]
+
+
+def distinct_tiles(tiles: list[NDArray[np.uint8]], limit: int = 8) -> list[NDArray[np.uint8]]:
+    """Toglie i doppioni (anche ruotati): restano le figure diverse."""
+
+    def key(t: NDArray[np.uint8]) -> NDArray[np.float32]:
+        g = cv2.cvtColor(np.ascontiguousarray(t[..., :3]), cv2.COLOR_RGB2LAB)
+        return cv2.resize(g, (48, 48), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    out: list[NDArray[np.uint8]] = []
+    keys: list[NDArray[np.float32]] = []
+    for t in tiles:
+        k = key(t)
+        square = abs(t.shape[0] - t.shape[1]) < 0.05 * max(t.shape[:2])
+        variants = [np.rot90(k, r) for r in ((0, 1, 2, 3) if square else (0, 2))]
+        # copie della stessa foto ~0; facce diverse dello stesso gres ~2; decori diversi 4-7
+        if any(min(float(np.abs(v - o).mean()) for v in variants) < 1.0 for o in keys):
+            continue
+        out.append(t)
+        keys.append(k)
+        if len(out) >= limit:
+            break
+    return out
