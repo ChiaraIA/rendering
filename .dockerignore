@@ -1,0 +1,10 @@
+.git
+.venv
+**/__pycache__
+pratiche
+dati
+catalogo_shopify
+.env
+*.log
+tests
+shopify

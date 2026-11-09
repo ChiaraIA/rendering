@@ -14,3 +14,7 @@ runs/
 pratiche/
 .gradio/
 catalogo_shopify/
+deploy/.env
+.env
+dati/
+.ca-prova.crt

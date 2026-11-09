@@ -1,0 +1,28 @@
+# HTTPS automatico (Let's Encrypt) e prima linea di difesa davanti al servizio.
+{$POSA_DOMINIO} {
+	request_body {
+		max_size 20MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	reverse_proxy posa:8000 {
+		header_up X-Forwarded-For {remote_host}
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+{
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 120s
+			write 120s
+			idle 60s
+		}
+	}
+}

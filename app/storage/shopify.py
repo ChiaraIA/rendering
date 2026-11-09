@@ -128,6 +128,12 @@ def _check_public_host(host: str) -> None:
     try:
         infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
     except OSError as exc:
+        import os
+
+        # dietro un proxy di uscita (HTTPS_PROXY) il nome lo risolve il proxy: resta valido
+        # il controllo sugli host consentiti, fatto prima di arrivare qui
+        if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
+            return
         raise UnsafeURL(f"host non risolvibile: {host}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
