@@ -198,6 +198,20 @@ fuga di 2-3 mm per le piastrelle, finitura lucida se nel testo c'è "lucido", "l
 | `finitura:` | `finitura:satinata` | `opaca`, `satinata` o `lucida` (riflessi) |
 | `render:no` | | esclude l'articolo (colle, accessori…) |
 
+Sono riconosciuti anche i tag nello stile `Chiave_Valore` (`Formato_60x120`,
+`Formato_Esagonale`, `Superficie_Lucida`, `Utilizzo_Pavimento`, `Utilizzo_Rivestimento`).
+Gli articoli con il tag `Fuori Produzione` e quelli che non sono rivestimenti (box doccia,
+accessori…) vengono saltati; la posa a spina di pesce non è ancora supportata.
+
+Quando la foto è la superficie della piastrella va bene in qualunque posizione (anche
+ruotata); più foto della stessa piastrella con colori simili diventano **varianti** alternate
+nella posa, come le diverse facce di un gres. Le foto con più piastrelle e fughe
+(composizioni) e le ambientazioni vengono scartate.
+
+Con migliaia di articoli, nella pagina web c'è la **ricerca** (es. `grigio cemento 60x60`):
+la galleria mostra i risultati e un clic su una miniatura sceglie l'articolo. Anche
+l'agente «materiali» cerca per parole invece di scorrere tutto il catalogo.
+
 `posa shopify` stampa per ogni articolo cosa ha fatto: foto usate e scartate, valori presi
 per buoni e cosa aggiungere quando un articolo non si può posare.
 
