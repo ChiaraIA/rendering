@@ -30,7 +30,7 @@ pavimento visibile, escludendo mobili, gambe di sedie e tavoli, tappeti, persone
    pavimento pixel per pixel e ne rifinisce i bordi sulla foto (gambe e fessure comprese).
 2. Lo strumento restituisce il verdetto di un controllore indipendente, l'overlay
    (`lavoro/maschera_N.jpg`: pavimento in azzurro, contorno rosso) e una tavola di DETTAGLI
-   ingranditi dei bordi più complicati (`lavoro/maschera_N_dettagli.jpg`). Aprili con Read.
+   ingranditi dei bordi più complicati (`lavoro/maschera_N_dettagli.jpg`). Aprili con `guarda`.
 3. Se il controllore boccia, correggi SOLO dove serve, sempre con base="automatica":
    - `escludi`: poligoni da togliere (tappeti, oggetti scambiati per pavimento, zone di
      un'altra stanza viste da una porta);
@@ -46,7 +46,7 @@ escludere. Rispondi con un riepilogo breve dell'esito."""
 GEOMETRY_AGENT = """Sei l'agente "geometra". Compito unico: dare la prospettiva del \
 pavimento, cioè i 4 angoli di un rettangolo reale sul pavimento e le sue misure.
 
-Apri con Read `preview_griglia.jpg` (righello in pixel: le coordinate sono di questa
+Apri con `guarda` `preview_griglia.jpg` (righello in pixel: le coordinate sono di questa
 immagine) e, se esiste, l'overlay della maschera approvata indicato da `stato_pratica`.
 
 Individua il rettangolo del pavimento della stanza: i lati sono le linee dove il pavimento
@@ -67,11 +67,11 @@ MATERIAL_AGENT = """Sei l'agente "materiali". Compito unico: stabilire QUALE art
 catalogo posare.
 
 Chiama `catalogo` per vedere gli articoli (e il foglio con le miniature indicato nella
-risposta, da aprire con Read). Il catalogo può avere migliaia di articoli: cerca con
+risposta, da aprire con `guarda`). Il catalogo può avere migliaia di articoli: cerca con
 `cerca` usando parole del nome (colore, effetto, formato: es. "grigio cemento 60x60",
 "esagona", "rovere") e restringi finché le miniature non bastano per scegliere.
 - Se il cliente ha indicato un codice, chiama `scegli_materiale` con quel codice esatto.
-- Se il cliente ha mandato la foto di un campione (`campione.jpg`), aprila con Read,
+- Se il cliente ha mandato la foto di un campione (`campione.jpg`), aprila con `guarda`,
   confrontala con il catalogo (colore, venatura, formato, finitura) e scegli l'articolo più
   simile con una motivazione concreta. Se nessun articolo è davvero simile, dillo nella
   motivazione: un controllore indipendente verificherà l'abbinamento.
@@ -95,7 +95,7 @@ tu decidi quanto pesa ogni parte:
 - `grana` (0-2, partenza 1): rumore della fotocamera come nel resto della foto.
 
 1. Chiama `proponi_luce` senza argomenti (valori di partenza della finitura).
-2. Apri con Read le immagini restituite: `lavoro/luce_N.jpg` (PRIMA/DOPO) e
+2. Apri con `guarda` le immagini restituite: `lavoro/luce_N.jpg` (PRIMA/DOPO) e
    `lavoro/luce_N_dettagli.jpg` (ingrandimenti dove il pavimento tocca oggetti e mobili).
 3. Se il controllo-luce boccia, correggi i valori secondo i problemi indicati (un passo
    alla volta, motivando) e riprova.

@@ -137,6 +137,12 @@ class Toolbox:
         return self._reply(step, att)
 
     # --------------------------------------------------------------------- stato
+    async def guarda(self, file: str) -> Result:
+        """Unico modo per gli agenti di vedere un'immagine: solo file della pratica."""
+        from app.agents.security import view_image
+
+        return view_image(self.ws.root, file)
+
     async def stato_pratica(self) -> Result:
         s = self.state
         req = s.request
@@ -689,6 +695,14 @@ class Toolbox:
         point = {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
         poly = {"type": "array", "items": point, "minItems": 3}
 
+        @tool(
+            "guarda",
+            "Mostra un'immagine della pratica (es. preview_griglia.jpg, lavoro/maschera_1.jpg).",
+            {"type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"]},
+        )
+        async def t_guarda(args: dict[str, Any]) -> dict[str, Any]:
+            return await self.guarda(str(args.get("file", "")))
+
         @tool("stato_pratica", "Stato della pratica, file disponibili e prossimo passo.", {})
         async def t_stato(args: dict[str, Any]) -> dict[str, Any]:
             return wrap(await self.stato_pratica())
@@ -823,6 +837,7 @@ class Toolbox:
             name="posa",
             version="1.0.0",
             tools=[
+                t_guarda,
                 t_stato,
                 t_maschera,
                 t_geometria,

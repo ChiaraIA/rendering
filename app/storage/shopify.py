@@ -109,6 +109,77 @@ def http_get(url: str, retries: int = 3) -> bytes:
     raise RuntimeError("irraggiungibile")  # pragma: no cover
 
 
+MAX_FETCH_BYTES = 25 * 1024 * 1024
+SHOPIFY_CDN = "cdn.shopify.com"
+
+
+class UnsafeURL(ValueError):
+    """Indirizzo non consentito (protezione SSRF)."""
+
+
+def _check_public_host(host: str) -> None:
+    """Il server non deve mai essere usato per raggiungere la rete interna o il cloud."""
+    import ipaddress
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise UnsafeURL(f"host non risolvibile: {host}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global or ip.is_multicast:
+            raise UnsafeURL(f"{host} punta a un indirizzo non pubblico")
+
+
+def safe_fetcher(store: str, shop_domain: str, check_dns: bool = True) -> Fetch:
+    """Download consentiti solo verso il negozio e il CDN di Shopify, in https, con
+    dimensione massima, e redirect ricontrollati uno per uno."""
+    allowed = {
+        (urllib.parse.urlparse(store_url(store)).hostname or "").lower(),
+        shop_domain.lower(),
+        SHOPIFY_CDN,
+    }
+
+    def validate(url: str) -> None:
+        u = urllib.parse.urlparse(url)
+        host = (u.hostname or "").lower()
+        if u.scheme != "https" or host not in allowed or u.username or u.password:
+            raise UnsafeURL(f"indirizzo non consentito: {u.scheme}://{host}")
+        if u.port not in (None, 443):
+            raise UnsafeURL("porta non consentita")
+        if check_dns:
+            _check_public_host(host)
+
+    class _Redirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            validate(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = urllib.request.build_opener(_Redirects)
+
+    def fetch(url: str) -> bytes:
+        if url.startswith("//"):
+            url = "https:" + url
+        validate(url)
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        for attempt in range(4):
+            try:
+                with opener.open(req, timeout=30) as resp:  # nosec B310: schema e host validati
+                    data = bytes(resp.read(MAX_FETCH_BYTES + 1))
+                if len(data) > MAX_FETCH_BYTES:
+                    raise UnsafeURL("risposta troppo grande")
+                return data
+            except urllib.error.HTTPError as exc:
+                if exc.code in {429, 503} and attempt < 3:
+                    time.sleep(5 * 2**attempt)
+                    continue
+                raise
+        raise RuntimeError("irraggiungibile")  # pragma: no cover
+
+    return fetch
+
+
 def store_url(store: str) -> str:
     """'negozio.myshopify.com', 'www.sito.it' o un URL completo -> 'https://host'."""
     s = store.strip().rstrip("/")
@@ -417,6 +488,8 @@ class Plan:
     marked: bool  # foto indicate a mano con "texture" nel testo alternativo
     mixed: bool  # più foto = più varianti miste nella posa
     url: str
+    handle: str = ""
+    variant_ids: list[str] = field(default_factory=list)
 
 
 def plan_product(product: dict[str, Any], base_url: str) -> tuple[list[Plan], list[str]]:
@@ -466,7 +539,10 @@ def plan_product(product: dict[str, Any], base_url: str) -> tuple[list[Plan], li
         aid = f"shop-{slug(handle)}" + (f"-{slug(label)}" if label else "")
         name = title + (f" — {label}" if label else "")
         mixed = True  # più facce della stessa piastrella = varianti, come nella posa vera
-        plans.append(Plan(aid[:64].rstrip("-"), name, rules, cand, is_marked, mixed, url))
+        vids = [str(v.get("id")) for v in variants if v.get("id") is not None]
+        plans.append(
+            Plan(aid[:64].rstrip("-"), name, rules, cand, is_marked, mixed, url, handle, vids)
+        )
     return plans, skipped
 
 
@@ -671,6 +747,14 @@ def sync(
                 (tex_dir / v["texture_file"]).is_file() for e in entries for v in e["variants"]
             ) and len(entries) == len(prev.get("articles", [])):
                 taken.update(e["id"] for e in entries)
+                if "handles" not in prev and prev.get("articles"):  # stato di versioni vecchie
+                    aids = prev["articles"]
+                    prev["handles"] = {str(product.get("handle", "")): aids}
+                    prev["variants"] = (
+                        {str(v.get("id")): aids[0] for v in product.get("variants", [])}
+                        if len(aids) == 1
+                        else {}
+                    )
                 new_state[pid] = prev
                 ids = [e["id"] for e in entries]
                 status = "invariato" if ids else "saltato"
@@ -715,7 +799,16 @@ def sync(
         if plans and pr.articles:
             pr.status = "importato"
         if plans or pid not in new_state:
-            new_state[pid] = {"fingerprint": fp, "articles": pr.articles, "notes": pr.notes}
+            built_ok = [pl for pl in plans if built[pl.article_id][0] is not None]
+            new_state[pid] = {
+                "fingerprint": fp,
+                "articles": pr.articles,
+                "notes": pr.notes,
+                "handles": {built_ok[0].handle: [pl.article_id for pl in built_ok]}
+                if built_ok
+                else {},
+                "variants": {v: pl.article_id for pl in built_ok for v in pl.variant_ids},
+            }
         report.products.append(pr)
 
     report.removed = sorted(set(old_catalog) - {m["id"] for m in materials})
@@ -727,6 +820,13 @@ def sync(
     tmp = out_dir / "catalog.json.tmp"
     tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(out_dir / "catalog.json")
+    # indice per il widget del negozio: articolo/variante Shopify -> codice del catalogo
+    index: dict[str, dict[str, Any]] = {"handles": {}, "variants": {}}
+    for st in new_state.values():
+        for handle, aids in st.get("handles", {}).items():
+            index["handles"][handle] = aids
+        index["variants"].update(st.get("variants", {}))
+    (out_dir / "index.json").write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
     state_path.write_text(
         json.dumps(
             {"store": base, "collection": collection, "products": new_state},

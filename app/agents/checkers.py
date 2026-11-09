@@ -1,7 +1,7 @@
 """Controllori indipendenti.
 
 Ogni controllore è una sessione Claude separata, avviata dal CODICE (non dall'orchestratore):
-- vede solo le immagini che gli passiamo, con lo strumento Read;
+- vede solo le immagini che gli passiamo (strumento `guarda`, elenco chiuso);
 - non conosce la conversazione dell'agente che ha prodotto il lavoro;
 - può rispondere solo chiamando il tool `verdetto`; se non lo fa, il verdetto è negativo.
 Così nessun agente esecutore può approvarsi da solo o saltare un controllo.
@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 from app import config
 from app.agents import prompts
+from app.agents.security import INJECTION_GUARD, locked_options, redact, view_image
 from app.agents.state import Verdict
 
 
@@ -38,7 +39,6 @@ class ClaudeChecker:
 
     async def __call__(self, req: CheckRequest, cwd: Path) -> Verdict:
         from claude_agent_sdk import (
-            ClaudeAgentOptions,
             ResultMessage,
             create_sdk_mcp_server,
             query,
@@ -65,21 +65,30 @@ class ClaudeChecker:
                 box.update(args)
             return {"content": [{"type": "text", "text": "Verdetto registrato. Hai finito."}]}
 
-        server = create_sdk_mcp_server(name="verdetto", version="1.0.0", tools=[verdetto])
+        allowed_images = set(req.images)
+
+        @tool(
+            "guarda",
+            "Mostra una delle immagini da esaminare.",
+            {"type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"]},
+        )
+        async def guarda(args: dict[str, Any]) -> dict[str, Any]:
+            return view_image(cwd, str(args.get("file", "")), allowed_images)
+
+        server = create_sdk_mcp_server(name="verdetto", version="1.0.0", tools=[verdetto, guarda])
         images = "\n".join(f"- {p}" for p in req.images)
         prompt = (
-            f"{req.instructions}\n\nImmagini da esaminare (aprile con Read):\n{images}\n\n"
+            f"{req.instructions}\n\nImmagini da esaminare (aprile con `guarda`):\n{images}\n\n"
             f"{req.context}\n\nQuando hai deciso, chiama il tool `verdetto`."
         )
-        options = ClaudeAgentOptions(
-            system_prompt=prompts.CHECKER_SYSTEM.format(nome=req.checker),
+        options = locked_options(
+            system_prompt=prompts.CHECKER_SYSTEM.format(nome=req.checker) + INJECTION_GUARD,
             model=self.model,
             cwd=str(cwd),
             mcp_servers={"verdetto": server},
-            allowed_tools=["Read", "mcp__verdetto__verdetto"],
-            tools=["Read"],
-            permission_mode="dontAsk",
+            allowed_tools=["mcp__verdetto__verdetto", "mcp__verdetto__guarda"],
             max_turns=8,
+            max_budget_usd=config.CHECK_BUDGET_USD,
         )
         cost = None
         async for msg in query(prompt=prompt, options=options):
@@ -95,7 +104,7 @@ class ClaudeChecker:
         return Verdict(
             checker=req.checker,
             approved=bool(box["approvato"]),
-            reason=str(box.get("motivo", "")),
-            issues=[str(p) for p in box.get("problemi", []) or []],
+            reason=redact(str(box.get("motivo", "")), 600),
+            issues=[redact(str(p), 300) for p in (box.get("problemi", []) or [])[:12]],
             cost_usd=cost,
         )

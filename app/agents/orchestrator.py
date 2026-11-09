@@ -18,6 +18,7 @@ from typing import Any
 from app import config
 from app.agents import prompts
 from app.agents.checkers import CheckerRunner, ClaudeChecker
+from app.agents.security import INJECTION_GUARD, locked_options, redact
 from app.agents.state import ClientRequest
 from app.agents.tools import Toolbox
 from app.catalog.loader import Catalog
@@ -42,30 +43,30 @@ def _subagents(model: str) -> dict[str, Any]:
     from claude_agent_sdk import AgentDefinition
 
     def t(*names: str) -> list[str]:
-        return ["Read", *[f"mcp__posa__{n}" for n in names]]
+        return [f"mcp__posa__{n}" for n in ("guarda", *names)]
 
     return {
         "pavimento": AgentDefinition(
             description="Delimita il pavimento visibile (maschera), escludendo mobili e muri.",
-            prompt=prompts.MASK_AGENT,
+            prompt=prompts.MASK_AGENT + INJECTION_GUARD,
             tools=t("proponi_maschera", "stato_pratica"),
             model=model,
         ),
         "geometra": AgentDefinition(
             description="Trova la prospettiva del pavimento: 4 angoli della stanza e misure.",
-            prompt=prompts.GEOMETRY_AGENT,
+            prompt=prompts.GEOMETRY_AGENT + INJECTION_GUARD,
             tools=t("proponi_geometria", "stato_pratica"),
             model=model,
         ),
         "materiali": AgentDefinition(
             description="Sceglie l'articolo: codice del cliente o abbinamento al campione.",
-            prompt=prompts.MATERIAL_AGENT,
+            prompt=prompts.MATERIAL_AGENT + INJECTION_GUARD,
             tools=t("catalogo", "scegli_materiale", "stato_pratica"),
             model=model,
         ),
         "luci": AgentDefinition(
             description="Regola luci, ombre e riflessi del nuovo pavimento perché sia naturale.",
-            prompt=prompts.LIGHT_AGENT,
+            prompt=prompts.LIGHT_AGENT + INJECTION_GUARD,
             tools=t("proponi_luce", "stato_pratica"),
             model=model,
         ),
@@ -101,11 +102,12 @@ async def run_job(
     checker: CheckerRunner | None = None,
     model: str | None = None,
 ) -> JobOutcome:
-    from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, query
+    from claude_agent_sdk import AssistantMessage, ResultMessage, query
 
     model = model or config.AGENT_MODEL
     toolbox = Toolbox(ws, catalog, checker or ClaudeChecker(model))
     tools = [
+        "guarda",
         "stato_pratica",
         "proponi_maschera",
         "proponi_geometria",
@@ -116,16 +118,16 @@ async def run_job(
         "consegna",
         "richiedi_operatore",
     ]
-    options = ClaudeAgentOptions(
-        system_prompt=prompts.ORCHESTRATOR,
+    options = locked_options(
+        system_prompt=prompts.ORCHESTRATOR + INJECTION_GUARD,
         model=model,
         cwd=str(ws.root),
         mcp_servers={"posa": toolbox.mcp_server()},
         agents=_subagents(model),
-        tools=["Read", "Task", "Agent"],
-        allowed_tools=["Read", "Task", "Agent", *[f"mcp__posa__{n}" for n in tools]],
-        permission_mode="dontAsk",
+        tools=["Task", "Agent"],  # solo deleghe ai sotto-agenti: niente file, shell o rete
+        allowed_tools=["Task", "Agent", *[f"mcp__posa__{n}" for n in tools]],
         max_turns=config.ORCHESTRATOR_MAX_TURNS,
+        max_budget_usd=config.JOB_BUDGET_USD,
     )
     ws.log(f"🧭 orchestratore: pratica avviata (modello {model})")
     names: dict[str, str] = {}  # tool_use_id della delega -> nome del sotto-agente
@@ -135,7 +137,7 @@ async def run_job(
         if isinstance(msg, AssistantMessage):
             _narrate(ws, msg, names, seen)
         elif isinstance(msg, ResultMessage):
-            summary = msg.result or ""
+            summary = redact(msg.result or "")
             cost = msg.total_cost_usd or 0.0
     ws.state.cost_usd += cost
     ws.persist()
@@ -159,16 +161,16 @@ def _narrate(ws: Workspace, msg: Any, names: dict[str, str], seen: set[str]) -> 
                 continue
             seen.add(bid)
         if kind == "TextBlock" and block.text.strip():
-            text = " ".join(block.text.split())
-            ws.log(f"{who}: {text[:400]}{'…' if len(text) > 400 else ''}")
+            ws.log(f"{who}: {redact(' '.join(block.text.split()), 400)}")
         elif kind == "ToolUseBlock":
             inp = getattr(block, "input", {}) or {}
             if block.name in ("Task", "Agent"):
                 sub = str(inp.get("subagent_type", "?"))
                 names[block.id] = sub
-                ws.log(f"🧭 orchestratore → delega a «{sub}»: {inp.get('description', '')}")
-            elif block.name == "Read":
-                ws.log(f"{who} guarda {Path(str(inp.get('file_path', ''))).name}")
+                what = redact(str(inp.get("description", "")), 200)
+                ws.log(f"🧭 orchestratore → delega a «{sub}»: {what}")
+            elif block.name == "mcp__posa__guarda":
+                ws.log(f"{who} guarda {Path(str(inp.get('file', ''))).name}")
             elif block.name.startswith("mcp__posa__"):
                 short = block.name.removeprefix("mcp__posa__")
                 if short not in ("stato_pratica",):

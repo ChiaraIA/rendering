@@ -43,6 +43,11 @@ def _readback(path: Path) -> tuple[NDArray[np.uint8], bytes | None]:
     return np.asarray(img, dtype=np.uint8), (img.info.get("icc_profile") or None)
 
 
+def master_path(out_dir: Path, ext: str = "png") -> Path:
+    """Dove l'exporter scrive il master (l'unico modulo che conosce questo nome)."""
+    return out_dir / f"final.{ext}"
+
+
 def export_master(
     result: CompositeResult,
     validation: ValidationReport,
@@ -55,7 +60,7 @@ def export_master(
         raise IntegrityError("export del master rifiutato: risultato non validato")
 
     ext = "png" if fmt == "png" else "tiff"
-    final_path = out_dir / f"final.{ext}"
+    final_path = master_path(out_dir, ext)
     tmp = out_dir / f".final.tmp.{ext}"
     _save_master(_image(result.pixels), tmp, fmt, icc)
 

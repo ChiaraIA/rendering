@@ -375,6 +375,30 @@ def _sync_shop_at_start() -> None:
 
 
 @app.command()
+def server(
+    porta: Annotated[int, typer.Option("--porta", help="Porta HTTP")] = 8000,
+    host: Annotated[str, typer.Option("--host", help="Indirizzo di ascolto")] = "127.0.0.1",
+) -> None:
+    """Avvia il servizio per i negozi Shopify (API, coda delle pratiche, webhook)."""
+    import uvicorn
+
+    from app.server.api import create_app
+    from app.server.settings import Settings
+
+    settings = Settings()
+    for problem in settings.check():
+        typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
+    uvicorn.run(
+        create_app(settings),
+        host=host,
+        port=porta,
+        proxy_headers=settings.trust_proxy,
+        server_header=False,
+        date_header=False,
+    )
+
+
+@app.command()
 def web(
     port: Annotated[int, typer.Option(help="Porta")] = 7860,
     share: Annotated[bool, typer.Option(help="Link pubblico temporaneo (Gradio)")] = False,
