@@ -26,6 +26,10 @@ class Settings:
     upload_key: str = field(
         default_factory=lambda: os.environ.get("POSA_CHIAVE_CARICAMENTI") or secrets.token_hex(32)
     )
+    # la chiave arriva dalla configurazione (e non è stata generata a questo avvio)
+    upload_key_configured: bool = field(
+        default_factory=lambda: bool(os.environ.get("POSA_CHIAVE_CARICAMENTI"))
+    )
     # dietro un reverse proxy fidato (es. Caddy/Nginx) che imposta X-Forwarded-For
     trust_proxy: bool = field(default_factory=lambda: os.environ.get("POSA_PROXY_FIDATO") == "1")
     public_url: str = field(default_factory=lambda: os.environ.get("POSA_URL_PUBBLICO", ""))
@@ -41,17 +45,26 @@ class Settings:
     retention_days: int = field(default_factory=lambda: _int("POSA_CONSERVAZIONE_GIORNI", 7))
     token_ttl_s: int = field(default_factory=lambda: _int("POSA_DURATA_PERMESSO_S", 900))
     proxy_max_age_s: int = field(default_factory=lambda: _int("POSA_ETA_FIRMA_PROXY_S", 300))
+    # dopo la consegna restano solo i risultati: foto originale e immagini di lavoro vengono
+    # cancellate subito. Con POSA_TIENI_LAVORAZIONE=1 restano fino alla scadenza (debug).
+    keep_work_files: bool = field(
+        default_factory=lambda: os.environ.get("POSA_TIENI_LAVORAZIONE") == "1"
+    )
 
     def scrub_environment(self) -> None:
-        """Toglie i segreti del servizio dall'ambiente: i processi figli (le sessioni degli
-        agenti) non li ereditano, quindi non sono raggiungibili nemmeno in teoria."""
+        """Toglie i segreti del servizio dall'ambiente del processo.
+
+        I processi figli (le sessioni degli agenti) non li ereditano. In più il valore viene
+        azzerato nella memoria d'origine: altrimenti resterebbe leggibile in
+        /proc/<pid>/environ da qualunque processo dello stesso utente, anche dopo la
+        rimozione. Resta solo ANTHROPIC_API_KEY, che agli agenti serve per funzionare."""
         for name in (
             "SHOPIFY_API_SECRET",
             "POSA_ADMIN_TOKEN",
             "POSA_CHIAVE_CARICAMENTI",
             "STRIPE_WEBHOOK_SECRET",
         ):
-            os.environ.pop(name, None)
+            _wipe_env(name)
 
     def check(self) -> list[str]:
         """Problemi di configurazione che impediscono di andare in produzione."""
@@ -67,6 +80,29 @@ class Settings:
             )
         if len(self.admin_token) < 24:
             problems.append("POSA_ADMIN_TOKEN mancante o troppo corto (minimo 24 caratteri)")
-        if not os.environ.get("POSA_CHIAVE_CARICAMENTI"):
+        if len(self.upload_key) < 32:
+            problems.append(
+                "POSA_CHIAVE_CARICAMENTI troppo corta (minimo 32 caratteri casuali): i "
+                "permessi di caricamento si potrebbero falsificare"
+            )
+        elif not self.upload_key_configured:
             problems.append("POSA_CHIAVE_CARICAMENTI assente: i permessi scadono a ogni riavvio")
         return problems
+
+
+def _wipe_env(name: str) -> None:
+    value = os.environ.get(name)
+    if value is None:
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        libc.getenv.restype = ctypes.c_void_p
+        libc.getenv.argtypes = [ctypes.c_char_p]
+        where = libc.getenv(name.encode())
+        if where:  # sovrascrive il valore dov'è, poi toglie la variabile
+            ctypes.memset(where, ord("x"), len(value.encode()))
+    except Exception:  # nosec B110 - sistemi senza libc compatibile: resta la rimozione
+        pass
+    os.environ.pop(name, None)

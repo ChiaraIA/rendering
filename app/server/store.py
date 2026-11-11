@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS tenants (
     daily_quota INTEGER NOT NULL,
     monthly_quota INTEGER,
     billing_ref TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    billing_token TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS api_keys (
     hash TEXT PRIMARY KEY,
@@ -124,6 +125,9 @@ class Tenant:
     daily_quota: int
     monthly_quota: int | None  # None = quella del piano
     billing_ref: str
+    # codice di attivazione da mettere nel link di pagamento (client_reference_id): è
+    # segreto e casuale, perché quel campo lo può scrivere chi paga
+    billing_token: str = ""
 
     @property
     def active(self) -> bool:
@@ -162,13 +166,16 @@ def hash_key(key: str) -> str:
 
 
 _TENANT_COLS = (
-    "id, name, channel, site, origins, plan, status, daily_quota, monthly_quota, billing_ref"
+    "id, name, channel, site, origins, plan, status, daily_quota, monthly_quota, billing_ref, "
+    "billing_token"
 )
 _JOB_COLS = "id, shop, article, status, step, created_at, updated_at, cost_usd, surface, zone"
 
 
 def _tenant(r: tuple[Any, ...]) -> Tenant:
-    return Tenant(r[0], r[1], r[2], r[3], tuple(json.loads(r[4])), r[5], r[6], r[7], r[8], r[9])
+    return Tenant(
+        r[0], r[1], r[2], r[3], tuple(json.loads(r[4])), r[5], r[6], r[7], r[8], r[9], r[10]
+    )
 
 
 class Store:
@@ -203,6 +210,11 @@ class Store:
             )
         if "zone" not in cols:
             self._db.execute("ALTER TABLE jobs ADD COLUMN zone TEXT NOT NULL DEFAULT 'automatica'")
+        tcols = {r[1] for r in self._db.execute("PRAGMA table_info(tenants)")}
+        if "billing_token" not in tcols:
+            self._db.execute(
+                "ALTER TABLE tenants ADD COLUMN billing_token TEXT NOT NULL DEFAULT ''"
+            )
         old = self._db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='shops'"
         ).fetchone()
@@ -224,6 +236,10 @@ class Store:
                     ),
                 )
             self._db.execute("DROP TABLE shops")
+        for (tid,) in self._db.execute("SELECT id FROM tenants WHERE billing_token=''").fetchall():
+            self._db.execute(
+                "UPDATE tenants SET billing_token=? WHERE id=?", (secrets.token_urlsafe(32), tid)
+            )
 
     # ------------------------------------------------------------------- piani
     def plans(self) -> list[Plan]:
@@ -282,8 +298,8 @@ class Store:
             if exists is None:
                 self._db.execute(
                     "INSERT INTO tenants(id, name, channel, site, origins, plan, status, "
-                    "daily_quota, monthly_quota, created_at) VALUES(?, ?, ?, ?, ?, ?, 'attivo', "
-                    "?, ?, ?)",
+                    "daily_quota, monthly_quota, created_at, billing_token) "
+                    "VALUES(?, ?, ?, ?, ?, ?, 'attivo', ?, ?, ?, ?)",
                     (
                         tenant_id,
                         name,
@@ -294,6 +310,7 @@ class Store:
                         daily_quota,
                         monthly_quota,
                         time.time(),
+                        secrets.token_urlsafe(32),
                     ),
                 )
             else:
@@ -335,6 +352,32 @@ class Store:
                 (ref,),
             ).fetchone()
         return _tenant(r) if r else None
+
+    def tenant_by_billing_token(self, token: str) -> Tenant | None:
+        """Cliente a cui appartiene un codice di attivazione (confronto esatto, indicizzato
+        dal database: il codice è casuale e lungo, non si indovina)."""
+        if len(token) < 32 or len(token) > 128:
+            return None
+        with self._lock:
+            r = self._db.execute(
+                f"SELECT {_TENANT_COLS} FROM tenants WHERE billing_token=?",  # nosec B608
+                (token,),
+            ).fetchone()
+        return _tenant(r) if r else None
+
+    def link_billing(self, tenant_id: str, ref: str) -> bool:
+        """Collega il cliente Stripe SOLO se non ce n'è già uno: un secondo pagamento non
+        può sostituire quello vero. Per cambiarlo serve l'amministratore (`set_billing`)."""
+        with self._lock:
+            taken = self._db.execute(
+                "SELECT 1 FROM tenants WHERE billing_ref=? AND id<>?", (ref, tenant_id)
+            ).fetchone()
+            if taken:
+                return False
+            cur = self._db.execute(
+                "UPDATE tenants SET billing_ref=? WHERE id=? AND billing_ref=''", (ref, tenant_id)
+            )
+        return cur.rowcount == 1
 
     def set_status(self, tenant_id: str, status: str) -> None:
         if status not in TENANT_STATUSES:
@@ -445,18 +488,39 @@ class Store:
 
     def quota_problem(self, tenant: Tenant) -> str | None:
         """None se il cliente può avviare un'altra prova questo mese, altrimenti il motivo."""
-        allowed, overage = self.monthly_allowance(tenant)
-        used = self.usage(tenant.id)
-        in_flight = used.created - used.delivered - used.failed
-        if used.created >= ATTEMPTS_FACTOR * max(allowed, 1) and not overage:
+        with self._lock:
+            return self._quota_problem(tenant)
+
+    def _quota_problem(self, tenant: Tenant) -> str | None:
+        """Come `quota_problem`, da chiamare con il lucchetto già preso."""
+        plan = self._db.execute(
+            "SELECT monthly_jobs, overage FROM plans WHERE id=?", (tenant.plan,)
+        ).fetchone()
+        overage = bool(plan[1]) if plan else False
+        allowed = tenant.monthly_quota
+        if allowed is None:
+            allowed = int(plan[0]) if plan else 0
+        r = self._db.execute(
+            "SELECT created, delivered, failed FROM usage WHERE tenant=? AND month=?",
+            (tenant.id, month_of()),
+        ).fetchone()
+        created, delivered, failed = r if r else (0, 0, 0)
+        if overage:
+            return None
+        if created >= ATTEMPTS_FACTOR * max(allowed, 1):
             return "troppe prove non riuscite questo mese: contatta l'assistenza"
-        if not overage and used.delivered + in_flight >= allowed:
+        if delivered + (created - delivered - failed) >= allowed:
             return "prove del mese esaurite per questo piano"
         return None
 
     # ---------------------------------------------------------------- pratiche
     def ip_hash(self, ip: str) -> str:
         return hashlib.sha256(f"{self._salt}:{ip}".encode()).hexdigest()[:32]
+
+    def nonce_used(self, nonce: str) -> bool:
+        with self._lock:
+            r = self._db.execute("SELECT 1 FROM nonces WHERE nonce=?", (nonce,)).fetchone()
+        return r is not None
 
     def use_nonce(self, nonce: str) -> bool:
         """Un permesso di caricamento vale una volta sola."""
@@ -493,16 +557,72 @@ class Store:
         surface: str = "pavimento",
         zone: str = "automatica",
     ) -> str:
+        with self._lock:
+            return self._insert_job(shop, article, ip_hash, room, surface, zone)
+
+    def _insert_job(
+        self, shop: str, article: str, ip_hash: str, room: str | None, surface: str, zone: str
+    ) -> str:
         job_id = secrets.token_urlsafe(24)  # 192 bit: non si indovina
         now = time.time()
-        with self._lock:
-            self._db.execute(
-                "INSERT INTO jobs(id, shop, article, status, created_at, updated_at, ip_hash, "
-                "room, surface, zone) VALUES(?, ?, ?, 'in_coda', ?, ?, ?, ?, ?, ?)",
-                (job_id, shop, article, now, now, ip_hash, room, surface, zone),
-            )
-            self._bump(shop, month_of(now), "created")
+        self._db.execute(
+            "INSERT INTO jobs(id, shop, article, status, created_at, updated_at, ip_hash, "
+            "room, surface, zone) VALUES(?, ?, ?, 'in_coda', ?, ?, ?, ?, ?, ?)",
+            (job_id, shop, article, now, now, ip_hash, room, surface, zone),
+        )
+        self._bump(shop, month_of(now), "created")
         return job_id
+
+    def admit_job(
+        self,
+        tenant: Tenant,
+        article: str,
+        ip_hash: str,
+        room: str | None,
+        surface: str,
+        zone: str,
+        *,
+        ip_limit: int | None,
+        max_queue: int,
+        nonce: str | None,
+    ) -> tuple[str | None, int, str]:
+        """Tutti i limiti e la creazione della pratica in un'unica operazione.
+
+        Controllare e poi creare in due passi lasciava una finestra: molte richieste in
+        parallelo passavano tutte il controllo e superavano quota mensile, limite
+        giornaliero e limite per indirizzo. Qui nessun'altra richiesta può infilarsi in
+        mezzo. Ritorna (id pratica, 201, "") oppure (None, codice HTTP, motivo).
+        """
+        now = time.time()
+        with self._lock:
+            row = self._db.execute("SELECT status FROM tenants WHERE id=?", (tenant.id,)).fetchone()
+            if row is None or row[0] != "attivo":
+                return None, 403, "abbonamento non attivo"
+            if reason := self._quota_problem(tenant):
+                return None, 402, reason
+            q = "SELECT COUNT(*) FROM jobs WHERE shop=? AND created_at>=?"
+            if self._db.execute(q, (tenant.id, now - 86400)).fetchone()[0] >= tenant.daily_quota:
+                return None, 429, "limite giornaliero di prove raggiunto"
+            if ip_limit is not None:
+                q = "SELECT COUNT(*) FROM jobs WHERE ip_hash=? AND created_at>=?"
+                if self._db.execute(q, (ip_hash, now - 3600)).fetchone()[0] >= ip_limit:
+                    return None, 429, "troppe prove: riprova più tardi"
+            q = "SELECT COUNT(*) FROM jobs WHERE status IN ('in_coda', 'in_lavorazione')"
+            if self._db.execute(q).fetchone()[0] >= max_queue:
+                return None, 503, "servizio molto richiesto: riprova tra qualche minuto"
+            if nonce is not None:
+                try:
+                    self._db.execute(
+                        "INSERT INTO nonces(nonce, used_at) VALUES(?, ?)", (nonce, now)
+                    )
+                except sqlite3.IntegrityError:
+                    return None, 401, "permesso già usato"
+            return self._insert_job(tenant.id, article, ip_hash, room, surface, zone), 201, ""
+
+    def delete_job(self, job_id: str) -> None:
+        """Toglie la pratica dall'archivio (l'uso del mese resta: serve a fatturare)."""
+        with self._lock:
+            self._db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
     def job(self, job_id: str) -> Job | None:
         with self._lock:

@@ -7,6 +7,7 @@ agenti (che potrebbe essere stato manipolato da una foto malevola).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import queue
 import shutil
@@ -137,6 +138,11 @@ class JobQueue:
                 continue
             try:
                 self._run(job_id)
+            except Exception as exc:
+                # un worker non deve mai morire: senza worker il servizio si ferma
+                log.error("pratica %s: errore inatteso: %s", job_id[:6], redact(str(exc), 300))
+                with contextlib.suppress(Exception):  # l'archivio stesso non risponde
+                    self.store.update_job(job_id, status="non_riuscito", step="fermo")
             finally:
                 self._q.task_done()
 
@@ -174,13 +180,33 @@ class JobQueue:
                 )
             )
         except Exception as exc:  # la pratica fallisce, il servizio no
-            log.warning("pratica %s non riuscita: %s", job_id, redact(str(exc), 300))
+            # nei log solo l'inizio dell'id: l'id intero dà accesso al risultato
+            log.warning("pratica %s… non riuscita: %s", job_id[:6], redact(str(exc), 300))
             self.store.update_job(job_id, status="non_riuscito", step="fermo")
             return
-        if delivered and self._publish(d):
+        try:
+            published = delivered and self._publish(d)
+        except Exception as exc:
+            log.warning("pratica %s… non pubblicata: %s", job_id[:6], redact(str(exc), 300))
+            published = False
+        if self.store.job(job_id) is None:  # cancellata nel frattempo (diritto all'oblio)
+            shutil.rmtree(d, ignore_errors=True)
+            return
+        if published:
             self.store.update_job(job_id, status="pronto", step="completato", cost_usd=cost)
+            if not self.settings.keep_work_files:
+                self._minimize(d)
         else:
             self.store.update_job(job_id, status="non_riuscito", step="fermo", cost_usd=cost)
+
+    def _minimize(self, d: Path) -> None:
+        """Consegnato il risultato, la foto del cliente e le immagini di lavoro non servono
+        più: restano solo i due JPEG pubblici e il verbale dei controlli (senza immagini)."""
+        report = d / "pratica" / "consegna" / "report.json"
+        if report.is_file():
+            shutil.copyfile(report, d / "report.json")
+        shutil.rmtree(d / "input", ignore_errors=True)
+        shutil.rmtree(d / "pratica", ignore_errors=True)
 
     def _publish(self, d: Path) -> bool:
         """Risultati per il cliente: JPEG ricodificati, senza metadati della foto originale."""

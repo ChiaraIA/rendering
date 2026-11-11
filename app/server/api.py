@@ -19,7 +19,6 @@ import logging
 import re
 import secrets
 import threading
-import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -27,10 +26,11 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image
+from starlette.concurrency import run_in_threadpool
 
 from app.server import shopify_auth as auth
 from app.server.jobs import JobQueue, Runner, job_dir, step_message, tenant_dir
-from app.server.limits import BodyLimitMiddleware
+from app.server.limits import BodyLimitMiddleware, RateLimiter
 from app.server.settings import Settings
 from app.server.store import (
     CHANNELS,
@@ -56,7 +56,9 @@ PLAN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,29}$")
 KEY_PREFIX = re.compile(r"^[ps]k_live_[A-Za-z0-9_-]{6}$")
 ZONES = ("automatica", "paraschizzi", "parete")
 MAX_WEBHOOK_BYTES = 1_000_000
+ADMIN_FAILURES_PER_HOUR = 20
 MAX_CATALOG_PHOTOS = 8
+MAX_CATALOG_REQUEST_MB = 20  # richiesta intera al catalogo (come il limite del proxy Caddy)
 STATIC = Path(__file__).parent / "static"
 
 SECURITY_HEADERS = {
@@ -98,14 +100,16 @@ def create_app(
     store = Store(st.data_dir / "servizio.db")
     jobs = JobQueue(st, store, runner)
     Image.MAX_IMAGE_PIXELS = st.max_pixels  # oltre: "bomba di decompressione", rifiutata
+    limiter = RateLimiter()
     sync_timers: dict[str, threading.Timer] = {}
     sync_lock = threading.Lock()
     max_bytes = st.max_upload_mb * 1024 * 1024
 
     def body_limit(path: str) -> int:
-        """Una foto per richiesta; solo il catalogo ne porta di più (fino a 8)."""
-        many = path.startswith("/v1/catalogo/")
-        return (MAX_CATALOG_PHOTOS if many else 1) * max_bytes + 64 * 1024
+        """Una foto per richiesta; solo il catalogo ne porta di più (fino a 8, 20 MB in tutto)."""
+        if path.startswith("/v1/catalogo/"):
+            return max(max_bytes, MAX_CATALOG_REQUEST_MB * 1024 * 1024) + 64 * 1024
+        return max_bytes + 64 * 1024
 
     app = FastAPI(title="posa", docs_url=None, redoc_url=None, openapi_url=None)
     # limite sul corpo applicato mentre arriva (anche senza Content-Length)
@@ -213,6 +217,10 @@ def create_app(
             {"permesso": token, "carica": f"{base}/api/pratiche", "scade_in_s": st.token_ttl_s}
         )
 
+    def attempt_allowed(request: Request, what: str, limit: int) -> bool:
+        """Limite per indirizzo su ciò che non lascia traccia nell'archivio."""
+        return limiter.allow(f"{what}:{store.ip_hash(client_ip(request))}", limit)
+
     async def accept_photo(
         request: Request,
         tenant: Tenant,
@@ -228,6 +236,14 @@ def create_app(
             return _err(403, "abbonamento non attivo")
         if problem := surface_problem(tenant, article, surface, zone):
             return problem
+        # rifiuti che non costano nulla, PRIMA di leggere il file: quota finita, permesso
+        # già usato, troppi tentativi dallo stesso indirizzo (file sbagliati compresi)
+        if reason := store.quota_problem(tenant):
+            return _err(402, reason)
+        if nonce is not None and store.nonce_used(nonce):
+            return _err(401, "permesso già usato")
+        if per_ip and not attempt_allowed(request, "invio", 5 * st.jobs_per_ip_hour):
+            return _err(429, "troppi tentativi: riprova più tardi")
         form = await request.form(max_files=1, max_fields=6)
         room = str(form.get("stanza", "") or "").strip().lower().replace(",", ".")
         if room:
@@ -241,23 +257,27 @@ def create_app(
         raw = await upload.read(max_bytes + 1)
         if len(raw) > max_bytes:
             return _err(413, f"foto troppo grande (massimo {st.max_upload_mb} MB)")
-        ext = _image_ext(raw)
+        # la decodifica completa costa tempo di CPU: fuori dal ciclo degli eventi, così un
+        # file pesante non blocca le altre richieste
+        ext = await run_in_threadpool(_image_ext, raw)
         if ext is None:
             return _err(415, "il file non è una foto supportata (JPEG, HEIC, PNG, WebP)")
-        # limiti: canone (quota del mese), anti-abuso (giorno, IP), capacità (coda)
-        now = time.time()
-        if reason := store.quota_problem(tenant):
-            return _err(402, reason)
-        if store.count_jobs(shop=tenant.id, since=now - 86400) >= tenant.daily_quota:
-            return _err(429, "limite giornaliero di prove raggiunto")
+        # limiti e creazione in un'unica operazione: canone (quota del mese), anti-abuso
+        # (giorno, indirizzo), capacità (coda), permesso monouso
         iph = store.ip_hash(client_ip(request))
-        if per_ip and store.count_jobs(ip_hash=iph, since=now - 3600) >= st.jobs_per_ip_hour:
-            return _err(429, "troppe prove: riprova più tardi")
-        if store.pending_jobs() >= st.max_queue:
-            return _err(503, "servizio molto richiesto: riprova tra qualche minuto")
-        if nonce is not None and not store.use_nonce(nonce):
-            return _err(401, "permesso già usato")
-        job_id = store.create_job(tenant.id, article, iph, room or None, surface, zone)
+        job_id, status, reason = store.admit_job(
+            tenant,
+            article,
+            iph,
+            room or None,
+            surface,
+            zone,
+            ip_limit=st.jobs_per_ip_hour if per_ip else None,
+            max_queue=st.max_queue,
+            nonce=nonce,
+        )
+        if job_id is None:
+            return _err(status, reason)
         d = job_dir(st, job_id) / "input"
         d.mkdir(parents=True)
         (d / f"foto.{ext}").write_bytes(raw)
@@ -325,6 +345,8 @@ def create_app(
     async def browser_session(request: Request) -> Response:
         """Permesso di caricamento chiesto dal widget con la chiave pubblica del sito.
         La chiave pubblica vale solo dalle pagine dei siti registrati per quel cliente."""
+        if not attempt_allowed(request, "sessione", 10 * st.jobs_per_ip_hour):
+            return _err(429, "troppe richieste: riprova più tardi")
         tenant = store.key_owner(request.headers.get("x-posa-chiave", ""), "pubblica")
         if tenant is None or not tenant.active:
             return _err(401, "chiave non valida o abbonamento non attivo")
@@ -405,14 +427,19 @@ def create_app(
             if isinstance(upload, str):
                 continue
             raw = await upload.read(max_bytes + 1)
-            if len(raw) > max_bytes or _image_ext(raw) is None:
+            if len(raw) > max_bytes or await run_in_threadpool(_image_ext, raw) is None:
                 return _err(415, "ogni foto deve essere JPEG, PNG, WebP o HEIC entro il limite")
             photos.append(raw)
         fields = {k: str(v) for k, v in form.items() if isinstance(v, str)}
         try:
             rules = catalog_store.parse_rules(fields)
-            entry, notes = catalog_store.put_article(
-                catalog_dir(tenant.id), article, fields.get("nome", ""), rules, photos
+            entry, notes = await run_in_threadpool(
+                catalog_store.put_article,
+                catalog_dir(tenant.id),
+                article,
+                fields.get("nome", ""),
+                rules,
+                photos,
             )
         except catalog_store.ArticleError as exc:
             return _err(422, str(exc))
@@ -459,6 +486,20 @@ def create_app(
         if job is None or job.shop != tenant.id:  # mai le pratiche di un altro cliente
             return _err(404, "pratica inesistente")
         return JSONResponse(job_body(job_id, "/api/pratiche"))
+
+    @app.delete("/v1/pratiche/{job_id}")
+    def v1_delete_job(request: Request, job_id: str) -> Response:
+        """Diritto alla cancellazione: toglie subito foto e risultato di una pratica del
+        cliente (prima della scadenza automatica). Mai quelle di un altro cliente."""
+        tenant = secret_tenant(request)
+        if tenant is None:
+            return _err(401, "chiave segreta non valida")
+        job = store.job(job_id) if JOB_ID.match(job_id) else None
+        if job is None or job.shop != tenant.id:
+            return _err(404, "pratica inesistente")
+        store.delete_job(job_id)
+        _rmtree(job_dir(st, job_id))
+        return JSONResponse({"ok": True})
 
     # ----------------------------------------------------------------- webhook
     @app.post("/webhooks/shopify")
@@ -512,18 +553,20 @@ def create_app(
         meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
         customer = str(obj.get("customer") or "")
         if kind == "checkout.session.completed":
-            # il link di pagamento porta l'id del cliente in client_reference_id
-            tenant = store.tenant(str(obj.get("client_reference_id") or ""))
-            if tenant and customer:
-                store.set_billing(tenant.id, ref=customer)
-                store.set_status(tenant.id, "attivo")
+            # `client_reference_id` lo può scrivere chi paga: vale solo il codice di
+            # attivazione segreto del cliente, mai il suo id; conta solo un abbonamento
+            # pagato; un cliente Stripe già collegato non si sostituisce. Lo stato del
+            # cliente NON cambia qui: lo decide l'abbonamento (evento successivo).
+            tenant = store.tenant_by_billing_token(str(obj.get("client_reference_id") or ""))
+            paid = obj.get("payment_status") in ("paid", "no_payment_required")
+            valid = bool(tenant and customer and obj.get("mode") == "subscription" and paid)
+            if tenant and valid and not store.link_billing(tenant.id, customer[:100]):
+                log.warning("cliente %s: pagamento da un altro cliente Stripe", tenant.id)
         elif kind.startswith("customer.subscription."):
-            tenant = store.tenant(str(meta.get("cliente", ""))) or store.tenant_by_billing_ref(
-                customer
-            )
+            # il cliente si riconosce solo dal cliente Stripe collegato al pagamento (o
+            # dall'amministratore): i metadati dell'abbonamento non indicano CHI è
+            tenant = store.tenant_by_billing_ref(customer)
             if tenant:
-                if customer and not tenant.billing_ref:
-                    store.set_billing(tenant.id, ref=customer)
                 plan = str(meta.get("piano", ""))
                 if plan and store.plan(plan):
                     store.set_billing(tenant.id, plan=plan)
@@ -570,8 +613,16 @@ def create_app(
     def is_admin(request: Request) -> bool:
         if len(st.admin_token) < 24:
             return False
+        # dopo troppi tentativi sbagliati un indirizzo resta fuori per un'ora, anche con
+        # il token giusto: niente ricerca del token per tentativi
+        who = f"admin:{store.ip_hash(client_ip(request))}"
+        if limiter.blocked(who, ADMIN_FAILURES_PER_HOUR):
+            return False
         given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        return hmac.compare_digest(given.encode(), st.admin_token.encode())
+        ok = hmac.compare_digest(given.encode(), st.admin_token.encode())
+        if not ok:
+            limiter.allow(who, ADMIN_FAILURES_PER_HOUR)
+        return ok
 
     def tenant_view(t: Tenant) -> dict[str, Any]:
         return {
@@ -583,6 +634,7 @@ def create_app(
             "stato": t.status,
             "prove_al_giorno": t.daily_quota,
             "riferimento_pagamento": t.billing_ref,
+            "codice_pagamento": t.billing_token,
             **_account(store, t),
         }
 

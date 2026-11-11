@@ -13,6 +13,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,7 @@ def put_article(
             (tex_dir / fname).write_bytes(data)
         doc["materials"] = [*others, entry]
         _write(catalog_dir, doc)
+        _collect_garbage(tex_dir, doc)
     return summary(entry), notes
 
 
@@ -229,7 +231,24 @@ def delete_article(catalog_dir: Path, article_id: str) -> bool:
             return False
         doc["materials"] = keep
         _write(catalog_dir, doc)
+        _collect_garbage(catalog_dir / "textures", doc)
     return True
+
+
+def _collect_garbage(tex_dir: Path, doc: dict[str, Any], grace_s: float = 3600.0) -> None:
+    """Toglie le foto non più usate da nessun articolo, altrimenti chi sostituisce un
+    articolo all'infinito riempie il disco. Quelle sostituite da meno di un'ora restano:
+    una pratica in corso potrebbe ancora leggerle."""
+    if not tex_dir.is_dir():
+        return
+    used = {v["texture_file"] for m in doc["materials"] for v in m["variants"]}
+    limit = time.time() - grace_s
+    for f in tex_dir.iterdir():
+        try:
+            if f.is_file() and f.name not in used and f.stat().st_mtime < limit:
+                f.unlink()
+        except OSError:
+            continue
 
 
 def article_uses(catalog_dir: Path, article_id: str) -> list[str] | None:

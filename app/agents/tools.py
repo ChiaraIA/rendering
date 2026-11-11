@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from app import config
 from app.agents import prompts
 from app.agents.checkers import CheckerRunner, CheckRequest
+from app.agents.security import redact
 from app.agents.state import (
     STEPS,
     Attempt,
@@ -234,7 +235,14 @@ class Toolbox:
         if self._auto_mask is None:
             what = "della parete" if self.state.is_wall else "del pavimento"
             self.ws.log(f"🧠 segmentazione automatica {what}…")
-            self._auto_mask = await asyncio.to_thread(self.segmenter, self.ws.source.pixels)
+            try:
+                self._auto_mask = await asyncio.to_thread(self.segmenter, self.ws.source.pixels)
+            except Exception as exc:
+                # modello non scaricato, memoria finita: si prosegue con i poligoni invece
+                # di far cadere la pratica (e senza dettagli interni verso gli agenti)
+                self.ws.log(f"⚠️ segmentazione non riuscita: {redact(str(exc), 200)}")
+                self.segmenter = None
+                return None
         return self._auto_mask
 
     def _build_mask(
@@ -602,6 +610,7 @@ class Toolbox:
         patch = self.ws.write_image(
             overlays.tile_patch(tex, None, hexagon=spec.is_hex), f"materiale_{spec.id}.jpg"
         )
+        motivazione = redact(str(motivazione), 500)
         self.ws.log(f"🧱 materiali: propone {spec.name} — {motivazione}")
         verdict = await self._check(
             CheckRequest(
@@ -609,7 +618,7 @@ class Toolbox:
                 prompts.CHECK_MATERIAL,
                 [req.sample_file, patch],
                 f"Articolo scelto: {spec.name} ({spec.id}), {spec.tile_w_mm / 10:g}x"
-                f"{spec.tile_h_mm / 10:g} cm. Motivazione dell'agente: {motivazione}",
+                f"{spec.tile_h_mm / 10:g} cm.",
             )
         )
         att = self._record("materiale", spec.id, patch, verdict)
@@ -675,7 +684,7 @@ class Toolbox:
                 self.prompts.check_light,
                 [ba, details],
                 f"Materiale: {spec.name}, finitura {spec.finish}. Regolazioni proposte: "
-                f"{params.model_dump()}. Motivazione dell'agente: {motivazione or '-'}",
+                f"{params.model_dump()}.",
             )
         )
         sha = sha256_bytes(params.model_dump_json().encode())
@@ -873,7 +882,7 @@ class Toolbox:
         return {"consegnato": self.state.delivered}
 
     async def richiedi_operatore(self, motivo: str) -> Result:
-        motivo = str(motivo)[:MAX_TEXT]
+        motivo = redact(str(motivo), MAX_TEXT)
         self.state.escalation = motivo
         self.ws.persist()
         (self.ws.root / "ESCALATION.txt").write_text(motivo + "\n", encoding="utf-8")

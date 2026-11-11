@@ -425,11 +425,14 @@ def server(
 ) -> None:
     """Avvia il servizio in abbonamento: API per i siti clienti e per i negozi Shopify,
     widget, coda delle pratiche, webhook (vedi docs/SAAS.md)."""
+    import os
+
     import uvicorn
 
     from app.server.api import create_app
     from app.server.settings import Settings
 
+    os.umask(0o077)  # foto dei clienti, archivio e chiavi leggibili solo dal servizio
     settings = Settings()
     for problem in settings.check():
         typer.secho(f"Attenzione: {problem}", fg=typer.colors.YELLOW, err=True)
@@ -441,6 +444,9 @@ def server(
         proxy_headers=settings.trust_proxy,
         server_header=False,
         date_header=False,
+        # niente registro degli accessi qui: conterrebbe gli id delle pratiche, che danno
+        # accesso alle foto dei clienti. Gli accessi li registra Caddy, già filtrati.
+        access_log=False,
     )
 
 

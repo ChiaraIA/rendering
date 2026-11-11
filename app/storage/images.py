@@ -8,7 +8,13 @@ from PIL import Image
 
 
 def jpeg_bytes(img: Image.Image, quality: int = 88) -> bytes:
-    """JPEG ricodificato da zero: nessun metadato o dato nascosto del file originale."""
+    """JPEG ricodificato da zero: nessun metadato o dato nascosto del file originale.
+
+    Pillow, salvando, ricopia da `info` alcuni campi dell'immagine d'origine (il commento
+    JPEG, per esempio): si salva quindi un'immagine nuova che ha solo i pixel."""
+    rgb = img.convert("RGB")
+    clean = Image.new("RGB", rgb.size)
+    clean.paste(rgb)
     buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=quality)
+    clean.save(buf, format="JPEG", quality=quality)
     return buf.getvalue()

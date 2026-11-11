@@ -240,11 +240,14 @@ def test_payments_activate_and_suspend_tenants(env) -> None:  # type: ignore[no-
     pk, sk = _tenant(client)
     _article(client, sk)
     store: Store = app.state.store
-    paid = {
-        "id": "evt_1",
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": "bianchi", "customer": "cus_123"}},
+    code = store.tenant("bianchi").billing_token  # type: ignore[union-attr]
+    session = {
+        "client_reference_id": code,  # il codice di attivazione segreto, non l'id
+        "customer": "cus_123",
+        "mode": "subscription",
+        "payment_status": "paid",
     }
+    paid = {"id": "evt_1", "type": "checkout.session.completed", "data": {"object": session}}
     assert _stripe(client, paid, secret="whsec_falso_falso_falso").status_code == 401
     assert _stripe(client, paid, ts=int(time.time()) - 3600).status_code == 401  # evento vecchio
     assert _stripe(client, paid).status_code == 200

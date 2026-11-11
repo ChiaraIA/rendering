@@ -122,7 +122,8 @@ curl https://SERVER/v1/account -H "Authorization: Bearer sk_live_..."
 piano di lavoro e pensili o finestre), `parete` (parete intera) o `automatica`. `stanza`
 (campo del modulo, facoltativo): misure in metri, `4.2x3.6` per il pavimento, larghezza x
 altezza della zona per una parete. Stati: `in_coda`, `in_lavorazione`, `pronto`,
-`non_riuscito`. Risposte d'errore: `401` chiave, `402` quota del mese finita, `403`
+`non_riuscito`. `DELETE /v1/pratiche/<pratica>` cancella subito foto e risultato (richiesta
+di cancellazione di un cliente finale). Risposte d'errore: `401` chiave, `402` quota del mese finita, `403`
 abbonamento o piano, `409` articolo non adatto alla superficie, `429` troppe richieste.
 
 ## Pagamenti (Stripe)
@@ -130,15 +131,20 @@ abbonamento o piano, `409` articolo non adatto alla superficie, `429` troppe ric
 Il servizio non incassa: legge lo stato dell'abbonamento da Stripe e attiva o sospende il
 cliente di conseguenza.
 
-1. In Stripe crea un prodotto ricorrente per ogni piano e un Payment Link (o Checkout) che
-   passi l'id del cliente in `client_reference_id`; nei metadati dell'abbonamento metti
-   `piano` (es. `professionale`) e, se vuoi, `cliente`.
-2. Crea l'endpoint webhook `https://SERVER/webhooks/stripe` con gli eventi
+1. In Stripe crea un prodotto ricorrente per ogni piano e un Payment Link (o Checkout).
+   Nei metadati dell'abbonamento metti `piano` (es. `professionale`).
+2. A ogni cliente dai il link con il **suo codice di pagamento** in `client_reference_id`
+   (`https://buy.stripe.com/...?client_reference_id=<codice>`). Il codice è nel campo
+   `codice_pagamento` di `GET /admin/clienti`: è segreto e diverso per ogni cliente,
+   perché quel campo lo può scrivere chi paga (con l'id del cliente, che è pubblico, si
+   potrebbe pagare "a nome" di un altro).
+3. Crea l'endpoint webhook `https://SERVER/webhooks/stripe` con gli eventi
    `checkout.session.completed` e `customer.subscription.*`, e metti il suo segreto in
    `STRIPE_WEBHOOK_SECRET`.
-3. Da quel momento: pagamento riuscito → cliente `attivo` e collegato al suo `cus_…`;
-   pagamento scaduto (`past_due`, `unpaid`) → `sospeso` (il widget risponde che
-   l'abbonamento non è attivo, i dati restano); disdetta → `disdetto`.
+4. Da quel momento: il primo pagamento collega il cliente al suo `cus_…` (una volta
+   sola: per cambiarlo serve `POST /admin/clienti/<id>/fatturazione`); l'abbonamento
+   attivo lo rende `attivo`; pagamento scaduto (`past_due`, `unpaid`) → `sospeso` (il
+   widget risponde che l'abbonamento non è attivo, i dati restano); disdetta → `disdetto`.
 
 Senza Stripe funziona tutto lo stesso: lo stato si cambia a mano con
 `POST /admin/clienti/<id>/stato`. **Prima di incassare davvero**, prova il giro completo in
@@ -156,9 +162,17 @@ automatici, ma non sono stati provati contro un account Stripe reale.
   non commerciale. È una situazione comune tra i prodotti commerciali, ma per un servizio
   a pagamento conviene un parere legale (o un modello addestrato su dati con licenza
   commerciale: il modello si cambia con `POSA_SEG_MODEL`).
-- **Privacy.** Le foto delle case dei clienti finali sono dati personali: servono
-  informativa, nomina a responsabile del trattamento nei contratti con i clienti e il
-  periodo di conservazione (`POSA_CONSERVAZIONE_GIORNI`, 7 giorni) scritto nei contratti.
+- **Privacy.** Le foto delle case dei clienti finali sono dati personali. Che cosa fa il
+  servizio: non raccoglie nomi, email o ordini; dell'indirizzo IP conserva solo un hash;
+  toglie i metadati (posizione GPS compresa) dalle immagini che pubblica; a prova
+  consegnata tiene solo il risultato, e cancella tutto dopo `POSA_CONSERVAZIONE_GIORNI`
+  (7); `DELETE /v1/pratiche/<id>` cancella subito una prova su richiesta dell'interessato;
+  `DELETE /admin/clienti/<id>` cancella tutto alla fine del rapporto. Che cosa devi fare
+  tu: informativa, nomina a responsabile del trattamento nei contratti con i clienti,
+  e dichiarare che le foto vengono elaborate da Anthropic (gli agenti le guardano): è un
+  tuo sub-responsabile, con le sue condizioni sul trattamento dei dati.
+- **Sicurezza.** Il pentest dell'11 novembre 2026 e ciò che resta da provare sono in
+  [SICUREZZA.md](SICUREZZA.md).
 - **Capacità.** Un server da 4 CPU esegue 2 pratiche insieme (`POSA_PRATICHE_IN_PARALLELO`)
   in 2-5 minuti l'una: circa 500-1000 prove al giorno. Oltre, servono più istanze e una
   coda condivisa (oggi coda e archivio sono locali: SQLite su un solo server).
