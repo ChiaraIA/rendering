@@ -7,7 +7,10 @@ Minacce considerate (vedi docs/SICUREZZA.md):
   della propria pratica, tramite `guarda`, da un elenco chiuso;
 - esfiltrazione: tutto ciò che gli agenti scrivono e che può arrivare al cliente passa da
   `redact`, che toglie chiavi e percorsi del server;
-- costo: ogni sessione ha un tetto di spesa e di turni.
+- costo: ogni sessione ha un tetto di spesa e di turni;
+- nessun agente parla ai controllori: i controllori ricevono solo immagini e dati calcolati
+  dal codice, mai testo scritto dall'agente che ha prodotto il lavoro (le "motivazioni"
+  restano nel registro), così un agente manipolato non può chiedere di essere approvato.
 """
 
 from __future__ import annotations
@@ -43,6 +46,29 @@ FORBIDDEN_BUILTINS = [
     "BashOutput",
     "Skill",
     "SlashCommand",
+    # strumenti aggiunti dalle versioni più recenti: nessuno serve agli agenti di posa
+    "PowerShell",
+    "REPL",
+    "LSP",
+    "Monitor",
+    "TaskOutput",
+    "TaskStop",
+    "TodoRead",
+    "ToolSearch",
+    "SendMessage",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "EnterWorktree",
+    "ExitWorktree",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ListMcpResourcesTool",
+    "ReadMcpResourceTool",
+    "PushNotification",
+    "Artifact",
+    "Computer",
 ]
 
 INJECTION_GUARD = """

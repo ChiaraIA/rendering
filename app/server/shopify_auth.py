@@ -53,8 +53,23 @@ def verify_webhook(body: bytes, header_hmac: str, secret: str) -> bool:
 
 
 # ------------------------------------------------------------ permessi di caricamento
-def make_upload_token(key: str, shop: str, article: str, ttl_s: int, nonce: str) -> str:
-    payload = {"s": shop, "a": article, "e": int(time.time()) + ttl_s, "n": nonce}
+def make_upload_token(
+    key: str,
+    shop: str,
+    article: str,
+    ttl_s: int,
+    nonce: str,
+    surface: str = "pavimento",
+    zone: str = "automatica",
+) -> str:
+    payload = {
+        "s": shop,
+        "a": article,
+        "e": int(time.time()) + ttl_s,
+        "n": nonce,
+        "u": surface,
+        "z": zone,
+    }
     raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
     sig = hmac.new(key.encode(), raw.encode(), hashlib.sha256).hexdigest()
     return f"{raw}.{sig}"
@@ -73,4 +88,29 @@ def read_upload_token(key: str, token: str, now: float | None = None) -> dict[st
         return None
     if not isinstance(payload, dict) or int(payload.get("e", 0)) < (now or time.time()):
         return None
-    return {"shop": str(payload["s"]), "article": str(payload["a"]), "nonce": str(payload["n"])}
+    return {
+        "shop": str(payload["s"]),
+        "article": str(payload["a"]),
+        "nonce": str(payload["n"]),
+        "surface": str(payload.get("u", "pavimento")),
+        "zone": str(payload.get("z", "automatica")),
+    }
+
+
+# ------------------------------------------------------------------- webhook Stripe
+def verify_stripe(
+    body: bytes, header: str, secret: str, tolerance_s: int = 300, now: float | None = None
+) -> bool:
+    """Firma dei webhook di Stripe: intestazione `Stripe-Signature: t=<unix>,v1=<hex>`,
+    HMAC-SHA256 di "<t>.<corpo>" con il segreto dell'endpoint (whsec_...)."""
+    if not secret or not header or len(header) > 1024:
+        return False
+    parts = [p.split("=", 1) for p in header.split(",") if "=" in p]
+    ts = next((v for k, v in parts if k.strip() == "t"), "")
+    sigs = [v for k, v in parts if k.strip() == "v1"]
+    if not ts.isdigit() or not sigs:
+        return False
+    if abs((now or time.time()) - int(ts)) > tolerance_s:  # niente riuso di eventi vecchi
+        return False
+    expected = hmac.new(secret.encode(), ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, s) for s in sigs)

@@ -36,6 +36,15 @@
 
     function say(text) { status.textContent = text; }
 
+    // superficie: fissata dal negozio nel blocco, oppure scelta dal cliente
+    var fixed = root.dataset.superficie === "pavimento" || root.dataset.superficie === "rivestimento";
+    var where = root.querySelector(".posa-prova__dove");
+    var sizes = root.querySelector(".posa-prova__misure");
+    if (fixed) { form.superficie.value = root.dataset.superficie; if (where) where.hidden = true; }
+    function syncSizes() { if (sizes) sizes.hidden = form.superficie.value !== "pavimento"; }
+    form.superficie.addEventListener("change", syncSizes);
+    syncSizes();
+
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       var file = form.foto.files && form.foto.files[0];
@@ -46,8 +55,10 @@
       img.hidden = true; link.hidden = true;
       say("Preparo la prova…");
 
+      var surface = form.superficie.value === "rivestimento" ? "rivestimento" : "pavimento";
+      if (surface !== "pavimento") room = "";
       var session = "/apps/posa/sessione?prodotto=" + encodeURIComponent(root.dataset.prodotto) +
-        "&variante=" + encodeURIComponent(variantId(root));
+        "&variante=" + encodeURIComponent(variantId(root)) + "&superficie=" + surface;
       fetch(session, { credentials: "same-origin" })
         .then(function (r) { if (!r.ok) throw new Error("sessione"); return r.json(); })
         .then(function (s) {

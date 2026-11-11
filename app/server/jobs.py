@@ -7,19 +7,22 @@ agenti (che potrebbe essere stato manipolato da una foto malevola).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import queue
 import shutil
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
 
 from app.agents.security import redact
-from app.agents.state import next_step
+from app.agents.state import Zone, next_step
 from app.catalog.loader import Catalog
+from app.core.models import Surface
 from app.server.settings import Settings
 from app.server.store import Store
 from app.storage import exporter
@@ -38,37 +41,58 @@ STEPS = {
     "completato": "Pronto",
     "fermo": "Serve un controllo manuale",
 }
+WALL_STEPS = STEPS | {
+    "maschera": "Riconosco la parete da rivestire",
+    "geometria": "Calcolo la prospettiva della parete",
+    "posa": "Poso il rivestimento",
+}
 OUTPUT_SIDE = 2400
 
-Runner = Callable[
-    [Path, Path, str, tuple[float, float] | None, Catalog, Callable[[str], None], float],
-    tuple[bool, float],
-]
+
+def step_message(step: str, surface: str = "pavimento") -> str:
+    table = WALL_STEPS if surface == "rivestimento" else STEPS
+    return table.get(step, "In attesa")
 
 
-def shop_dir(settings: Settings, domain: str) -> Path:
-    return settings.data_dir / "negozi" / domain
+@dataclass(frozen=True)
+class JobRequest:
+    """Tutto ciò che serve per eseguire una pratica."""
+
+    photo: Path
+    work: Path
+    article: str
+    room_m: tuple[float, float] | None
+    catalog: Catalog
+    on_step: Callable[[str], None]
+    timeout_s: float
+    surface: str = "pavimento"
+    zone: str = "automatica"
+
+
+Runner = Callable[[JobRequest], tuple[bool, float]]
+
+
+def tenant_dir(settings: Settings, tenant_id: str) -> Path:
+    """Cartella del cliente (catalogo). Le installazioni nate per soli negozi Shopify
+    usavano `negozi/<dominio>`: se esiste, resta quella."""
+    legacy = settings.data_dir / "negozi" / tenant_id
+    return legacy if legacy.is_dir() else settings.data_dir / "clienti" / tenant_id
 
 
 def job_dir(settings: Settings, job_id: str) -> Path:
     return settings.data_dir / "pratiche" / job_id
 
 
-def agent_runner(
-    photo: Path,
-    work: Path,
-    article: str,
-    room_m: tuple[float, float] | None,
-    catalog: Catalog,
-    on_step: Callable[[str], None],
-    timeout_s: float,
-) -> tuple[bool, float]:
+def agent_runner(req: JobRequest) -> tuple[bool, float]:
     """Esecuzione reale: sistema multiagente, interrotto se supera il tempo massimo."""
     from app.agents.orchestrator import run_job, start
 
-    ws = start(photo, work, article, None, room_m)
-    ws.listeners.append(lambda _line: on_step(next_step(ws.state).split(":")[0]))
-    outcome = asyncio.run(asyncio.wait_for(run_job(ws, catalog), timeout_s))
+    surface: Surface = "rivestimento" if req.surface == "rivestimento" else "pavimento"
+    zones: tuple[Zone, ...] = ("automatica", "paraschizzi", "parete")
+    zone: Zone = next((z for z in zones if z == req.zone), "automatica")
+    ws = start(req.photo, req.work, req.article, None, req.room_m, surface=surface, zone=zone)
+    ws.listeners.append(lambda _line: req.on_step(next_step(ws.state).split(":")[0]))
+    outcome = asyncio.run(asyncio.wait_for(run_job(ws, req.catalog), req.timeout_s))
     return outcome.delivered, outcome.cost_usd
 
 
@@ -82,6 +106,10 @@ class JobQueue:
         self._stop = threading.Event()
 
     def start(self) -> None:
+        # un riavvio ha interrotto queste pratiche: si chiudono, così il cliente non aspetta
+        # all'infinito e l'uso del mese resta corretto
+        for job_id in self.store.interrupted_job_ids():
+            self.store.update_job(job_id, status="non_riuscito", step="fermo")
         for job_id in self.store.queued_job_ids():  # riprende quelle rimaste in coda
             self._q.put(job_id)
         for k in range(self.settings.max_concurrent):
@@ -110,6 +138,11 @@ class JobQueue:
                 continue
             try:
                 self._run(job_id)
+            except Exception as exc:
+                # un worker non deve mai morire: senza worker il servizio si ferma
+                log.error("pratica %s: errore inatteso: %s", job_id[:6], redact(str(exc), 300))
+                with contextlib.suppress(Exception):  # l'archivio stesso non risponde
+                    self.store.update_job(job_id, status="non_riuscito", step="fermo")
             finally:
                 self._q.task_done()
 
@@ -119,7 +152,7 @@ class JobQueue:
             return
         d = job_dir(self.settings, job_id)
         photo = next(iter(sorted((d / "input").glob("foto.*"))), None)
-        catalog_file = shop_dir(self.settings, job.shop) / "catalogo" / "catalog.json"
+        catalog_file = tenant_dir(self.settings, job.shop) / "catalogo" / "catalog.json"
         if photo is None or not catalog_file.is_file():
             self.store.update_job(job_id, status="non_riuscito", step="fermo")
             return
@@ -134,22 +167,46 @@ class JobQueue:
         try:
             catalog = Catalog.load(catalog_file)
             delivered, cost = self.runner(
-                photo,
-                d / "pratica",
-                job.article,
-                room_m,
-                catalog,
-                on_step,
-                float(self.settings.job_timeout_s),
+                JobRequest(
+                    photo=photo,
+                    work=d / "pratica",
+                    article=job.article,
+                    room_m=room_m,
+                    catalog=catalog,
+                    on_step=on_step,
+                    timeout_s=float(self.settings.job_timeout_s),
+                    surface=job.surface,
+                    zone=job.zone,
+                )
             )
         except Exception as exc:  # la pratica fallisce, il servizio no
-            log.warning("pratica %s non riuscita: %s", job_id, redact(str(exc), 300))
+            # nei log solo l'inizio dell'id: l'id intero dà accesso al risultato
+            log.warning("pratica %s… non riuscita: %s", job_id[:6], redact(str(exc), 300))
             self.store.update_job(job_id, status="non_riuscito", step="fermo")
             return
-        if delivered and self._publish(d):
+        try:
+            published = delivered and self._publish(d)
+        except Exception as exc:
+            log.warning("pratica %s… non pubblicata: %s", job_id[:6], redact(str(exc), 300))
+            published = False
+        if self.store.job(job_id) is None:  # cancellata nel frattempo (diritto all'oblio)
+            shutil.rmtree(d, ignore_errors=True)
+            return
+        if published:
             self.store.update_job(job_id, status="pronto", step="completato", cost_usd=cost)
+            if not self.settings.keep_work_files:
+                self._minimize(d)
         else:
             self.store.update_job(job_id, status="non_riuscito", step="fermo", cost_usd=cost)
+
+    def _minimize(self, d: Path) -> None:
+        """Consegnato il risultato, la foto del cliente e le immagini di lavoro non servono
+        più: restano solo i due JPEG pubblici e il verbale dei controlli (senza immagini)."""
+        report = d / "pratica" / "consegna" / "report.json"
+        if report.is_file():
+            shutil.copyfile(report, d / "report.json")
+        shutil.rmtree(d / "input", ignore_errors=True)
+        shutil.rmtree(d / "pratica", ignore_errors=True)
 
     def _publish(self, d: Path) -> bool:
         """Risultati per il cliente: JPEG ricodificati, senza metadati della foto originale."""

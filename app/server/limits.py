@@ -10,8 +10,48 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
+from collections.abc import Callable
 from typing import Any
+
+
+class RateLimiter:
+    """Limite di frequenza in memoria: al massimo `limit` eventi per chiave in `window_s`.
+
+    Serve per ciò che non lascia traccia nell'archivio (permessi coniati, file rifiutati):
+    senza, una chiave pubblica copiata permetterebbe di far lavorare il server a vuoto. Le
+    chiavi sono hash dell'indirizzo, mai l'indirizzo. Lo stato si azzera al riavvio.
+    """
+
+    def __init__(self, max_keys: int = 50_000) -> None:
+        self._hits: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+        self._max_keys = max_keys
+
+    def blocked(self, key: str, limit: int, window_s: float = 3600.0) -> bool:
+        """True se la chiave ha già raggiunto il limite (senza registrare un evento)."""
+        now = time.monotonic()
+        with self._lock:
+            return sum(1 for t in self._hits.get(key, ()) if now - t < window_s) >= limit
+
+    def allow(self, key: str, limit: int, window_s: float = 3600.0) -> bool:
+        """Registra un evento; False se la chiave ha già raggiunto il limite."""
+        now = time.monotonic()
+        with self._lock:
+            hits = [t for t in self._hits.get(key, ()) if now - t < window_s]
+            if len(hits) >= limit:
+                self._hits[key] = hits
+                return False
+            hits.append(now)
+            self._hits[key] = hits
+            if len(self._hits) > self._max_keys:  # memoria limitata anche sotto attacco
+                for k in [k for k, v in self._hits.items() if not v or now - v[-1] >= window_s]:
+                    del self._hits[k]
+                while len(self._hits) > self._max_keys:
+                    del self._hits[next(iter(self._hits))]
+            return True
+
 
 Scope = dict[str, Any]
 Message = dict[str, Any]
@@ -31,9 +71,11 @@ class BodyLimitMiddleware:
         total_timeout_s: float = 300.0,
         min_rate_bps: float = 4096.0,
         grace_s: float = 10.0,
+        limit_for: Callable[[str], int] | None = None,
     ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.limit_for = limit_for  # limite per percorso (es. più foto nel catalogo)
         self.chunk_timeout_s = chunk_timeout_s
         self.total_timeout_s = total_timeout_s
         self.min_rate_bps = min_rate_bps  # sotto questa velocità media il corpo è un attacco
@@ -44,6 +86,7 @@ class BodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         received = 0
+        max_bytes = self.limit_for(scope.get("path", "")) if self.limit_for else self.max_bytes
         started = time.monotonic()
         response_started = False
 
@@ -58,7 +101,7 @@ class BodyLimitMiddleware:
                 raise _Abort(408, "invio troppo lento") from None
             if msg["type"] == "http.request":
                 received += len(msg.get("body", b""))
-                if received > self.max_bytes:
+                if received > max_bytes:
                     raise _Abort(413, "richiesta troppo grande")
                 elapsed = time.monotonic() - started
                 if (

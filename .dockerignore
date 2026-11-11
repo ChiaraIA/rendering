@@ -5,6 +5,7 @@ pratiche
 dati
 catalogo_shopify
 .env
+**/.env
 *.log
 tests
 shopify

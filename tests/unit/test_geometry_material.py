@@ -149,7 +149,7 @@ def test_light_and_contact_shadow() -> None:
     assert ao[y_near - bb[1], 320 - bb[0]] < ao[470 - bb[1], 320 - bb[0]]
 
 
-def test_rasterize_and_refine_stay_close() -> None:
+def test_rasterize_and_finalize_stay_close() -> None:
     poly = [(10.5, 10.5), (90, 10.5), (90, 60), (10.5, 60)]
     m = masking.rasterize((80, 100), [poly], [[(40, 30), (60, 30), (60, 50), (40, 50)]])
     assert m[35, 20] == 255 and m[40, 50] == 0 and m[5, 5] == 0
@@ -157,8 +157,9 @@ def test_rasterize_and_refine_stay_close() -> None:
     img = np.zeros((80, 100, 3), np.uint8)
     img[10:60, 10:90] = 200
     img[30:50, 40:60] = 30
-    r = masking.refine(img, m, band_px=6)
+    r = masking.finalize(img, m >= 128, snap_zone=np.ones(m.shape, bool), reach_px=2)
     assert r[35, 20] == 255 and r[2, 2] == 0
+    assert r[40, 50] == 0 and r[20, 50] == 255  # il buco e il pieno restano dove sono
 
 
 def test_preview_of_masks_keeps_geometry() -> None:

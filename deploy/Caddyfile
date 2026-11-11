@@ -1,4 +1,16 @@
 # HTTPS automatico (Let's Encrypt) e prima linea di difesa davanti al servizio.
+# Le opzioni globali devono stare PRIMA del sito, altrimenti Caddy non parte.
+{
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 120s
+			write 120s
+			idle 60s
+		}
+	}
+}
+
 {$POSA_DOMINIO} {
 	request_body {
 		max_size 20MB
@@ -10,19 +22,30 @@
 	reverse_proxy posa:8000 {
 		header_up X-Forwarded-For {remote_host}
 	}
+	# Nei log non devono restare dati che aprono qualcosa o che identificano una persona:
+	# l'id di una pratica dà accesso alla foto del cliente, i permessi e le firme si possono
+	# riusare finché valgono, l'indirizzo IP intero è un dato personale.
 	log {
 		output stdout
-		format json
-	}
-}
-
-{
-	servers {
-		timeouts {
-			read_header 10s
-			read_body 120s
-			write 120s
-			idle 60s
+		format filter {
+			wrap json
+			fields {
+				# un solo filtro per campo (un secondo sostituirebbe il primo): id delle
+				# pratiche e firme di Shopify nella stessa espressione
+				request>uri regexp "(/pratiche/|signature=)[A-Za-z0-9_-]{32,}" "${1}[omesso]"
+				request>headers>X-Posa-Permesso delete
+				request>headers>X-Posa-Chiave delete
+				request>headers>Stripe-Signature delete
+				request>headers>X-Shopify-Hmac-Sha256 delete
+				request>remote_ip ip_mask {
+					ipv4 24
+					ipv6 48
+				}
+				request>client_ip ip_mask {
+					ipv4 24
+					ipv6 48
+				}
+			}
 		}
 	}
 }

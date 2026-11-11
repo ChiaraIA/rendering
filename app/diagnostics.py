@@ -118,7 +118,7 @@ def model_check() -> Check:
             name,
             "errore",
             str(exc)[:300],
-            "controlla la connessione a huggingface.co (primo download ~230 MB)",
+            "controlla la connessione a huggingface.co (primo download ~470 MB)",
         )
     return Check(name, "ok", "scaricato e funzionante")
 

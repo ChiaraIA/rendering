@@ -95,7 +95,13 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
     cat = holder["cat"]
     choices = _choices(cat)
 
-    async def run(photo: str | None, material_id: str, sample: str | None, room: str):
+    async def run(
+        photo: str | None,
+        material_id: str,
+        sample: str | None,
+        room: str,
+        surface: str = "Pavimento",
+    ):
         if problem := credentials_problem():
             yield f"⚠️ Gli agenti non possono partire: {problem}", "", None, [], None
             return
@@ -125,7 +131,16 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
             loop.call_soon_threadsafe(queue.put_nowait, text)
 
         sample_path = Path(sample) if sample else None
-        ws = start(Path(photo), out_dir, material_id or None, sample_path, room_m, listener=push)
+        wall = str(surface or "").startswith("Parete")
+        ws = start(
+            Path(photo),
+            out_dir,
+            material_id or None,
+            sample_path,
+            room_m,
+            listener=push,
+            surface="rivestimento" if wall else "pavimento",
+        )
         lines: list[str] = []
         task = asyncio.create_task(run_job(ws, holder["cat"]))
         status = "⏳ Gli agenti sono al lavoro…"
@@ -159,10 +174,10 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
 
     with gr.Blocks(title="posa — rivestimenti nella tua stanza") as demo:
         gr.Markdown(
-            "# posa\n**Il tuo pavimento nuovo, nella foto della tua stanza.** "
-            "Un orchestratore coordina agenti specializzati (pavimento, prospettiva, materiale) e "
-            "ogni passo viene verificato da un controllore indipendente prima di arrivare a te. "
-            "La foto originale non viene mai modificata fuori dal pavimento.",
+            "# posa\n**Il pavimento o il rivestimento nuovo, nella foto della tua stanza.** "
+            "Un orchestratore coordina agenti specializzati (superficie, prospettiva, materiale, "
+            "luci) e ogni passo viene verificato da un controllore indipendente prima di "
+            "arrivare a te. La foto originale non viene mai modificata fuori dalla superficie.",
             elem_classes=["posa-title"],
         )
         with gr.Row():
@@ -198,13 +213,19 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
                     type="filepath",
                     file_types=["image", ".heic", ".heif"],
                 )
+                surface = gr.Radio(
+                    choices=["Pavimento", "Parete (rivestimento, es. paraschizzi della cucina)"],
+                    value="Pavimento",
+                    label="3 · Dove posarlo",
+                )
                 room = gr.Textbox(
-                    label="3 · Misure della stanza in metri (facoltativo)",
+                    label="4 · Misure in metri (facoltativo): stanza, o larghezza x altezza "
+                    "della zona di parete",
                     placeholder="es. 4.2x3.6 — se vuoto le stimano gli agenti",
                 )
-                go = gr.Button("Posa il pavimento", variant="primary")
+                go = gr.Button("Posa il rivestimento", variant="primary")
             with gr.Column(scale=6):
-                status = gr.Markdown("Carica una foto e premi **Posa il pavimento**.")
+                status = gr.Markdown("Carica una foto e premi **Posa il rivestimento**.")
                 slider = gr.ImageSlider(label="Prima / dopo", type="filepath")
                 log = gr.Textbox(
                     label="Cosa stanno facendo gli agenti",
@@ -252,7 +273,9 @@ def build_app(catalog: Catalog | None = None) -> gr.Blocks:
 
         gallery.select(pick, inputs=search, outputs=material)
         go.click(
-            run, inputs=[photo, material, sample, room], outputs=[status, log, slider, work, files]
+            run,
+            inputs=[photo, material, sample, room, surface],
+            outputs=[status, log, slider, work, files],
         )
     return demo
 
@@ -264,12 +287,19 @@ def _work_gallery(ws: Any) -> list[tuple[str, str]]:
         "prima_dopo": "prima/dopo",
         "materiale": "materiale",
         "luce": "luci e ombre",
+        "posa": "posa",
     }
+    # gli ingrandimenti che vedono i controllori: in una demo mostrano come si lavora sui bordi
+    details = {"_dettagli": " · ingrandimenti", "_bordi": " · bordi ingranditi"}
     out = []
     for p in sorted((ws.root / "lavoro").glob("*.jpg"), key=lambda q: q.stat().st_mtime):
-        stem = p.stem.rsplit("_", 1)[0]
-        if stem in labels:
-            out.append((str(p), f"{labels[stem]} {p.stem.rsplit('_', 1)[-1]}"))
+        name, extra = p.stem, ""
+        for suffix, text in details.items():
+            if name.endswith(suffix):
+                name, extra = name[: -len(suffix)], text
+        stem, _, number = name.rpartition("_")
+        if stem in labels and (extra or stem != "posa"):
+            out.append((str(p), f"{labels[stem]} {number}{extra}"))
     return out
 
 

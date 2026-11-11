@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "posa"
 version = "0.1.0"
-description = "Sistema multiagente che posa il pavimento scelto dal cliente nella foto della sua stanza, senza toccare un pixel fuori dal pavimento."
+description = "Sistema multiagente che posa pavimenti e rivestimenti a parete nella foto del cliente, senza toccare un pixel fuori dalla superficie. Servizio multi-cliente (SaaS)."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -38,6 +38,7 @@ include = ["app*"]
 
 [tool.setuptools.package-data]
 "app.catalog" = ["data/*.json", "data/textures/*.png"]
+"app.server" = ["static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

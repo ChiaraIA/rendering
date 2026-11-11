@@ -480,3 +480,155 @@ def make_room_scene(
     corners = np.array([[0, 0], [L, 0], [L, W], [0, W]], dtype=np.float64)
     pc = np.c_[corners, np.ones(4)] @ H.T
     return RoomScene(photo, mask, pc[:, :2] / pc[:, 2:3], H, K, (L, W), focal_35mm)
+
+
+# ------------------------------------------------------------------ cucina (pareti)
+
+
+@dataclass(frozen=True, eq=False)
+class KitchenScene:
+    """Foto sintetica di una cucina a L con verità nota: la fascia di muro tra piano di
+    lavoro e pensili (paraschizzi) su due pareti, una presa sul muro, un vaso sul piano."""
+
+    photo: NDArray[np.uint8]
+    wall_mask: NDArray[np.uint8]  # paraschizzi visibile (senza presa né vaso), 0/255
+    walls: list[
+        dict[str, object]
+    ]  # per parete: angoli (alto-sx, alto-dx, basso-dx, basso-sx), misure
+    socket_box: tuple[int, int, int, int]  # (x0, y0, x1, y1) in pixel
+    vase_box: tuple[int, int, int, int]
+    focal_35mm: float
+
+
+def make_kitchen_scene(
+    width: int = 960,
+    height: int = 720,
+    focal_35mm: float = 26.0,
+    cam: tuple[float, float, float] = (2300.0, 300.0, 1450.0),
+    pitch_deg: float = 4.0,
+    yaw_deg: float = -14.0,
+    seed: int = 0,
+) -> KitchenScene:
+    """Cucina a L: parete di fondo (y = 3000) e parete sinistra (x = 0), piano di lavoro a
+    900 mm, pensili da 1450 mm. Il paraschizzi è alto 550 mm su entrambe le pareti."""
+    depth, top_z, low_z = 3000.0, 1450.0, 900.0
+    f = focal_35mm * np.hypot(width, height) / np.hypot(36, 24)
+    K = np.array([[f, 0, width / 2], [0, f, height / 2], [0, 0, 1.0]])
+    R = _look(pitch_deg, yaw_deg)
+    C = np.asarray(cam)
+    ys, xs = np.mgrid[0:height, 0:width].astype(np.float64)
+    rays = np.stack([(xs + 0.5 - K[0, 2]) / f, (ys + 0.5 - K[1, 2]) / f, np.ones_like(xs)], -1)
+    d = rays @ R
+    t_best = np.full(xs.shape, np.inf)
+    kind = np.zeros(xs.shape, np.int8)
+    hit = np.zeros(xs.shape + (3,))
+
+    def plane(axis: int, value: float, k: int) -> None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (value - C[axis]) / d[..., axis]
+        ok = (t > 1e-6) & (t < t_best)
+        p = C + np.where(ok, t, 0.0)[..., None] * d
+        ok &= (p[..., 0] >= -1) & (p[..., 0] <= 4601) & (p[..., 1] >= -1) & (p[..., 1] <= depth + 1)
+        ok &= (p[..., 2] >= -1) & (p[..., 2] <= 2701)
+        t_best[ok], kind[ok] = t[ok], k
+        hit[ok] = p[ok]
+
+    def box(lo: tuple[float, float, float], hi: tuple[float, float, float], k: int) -> None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t1 = (np.asarray(lo) - C) / d
+            t2 = (np.asarray(hi) - C) / d
+        tmin = np.nanmax(np.minimum(t1, t2), axis=-1)
+        tmax = np.nanmin(np.maximum(t1, t2), axis=-1)
+        ok = (tmax >= tmin) & (tmin > 0) & (tmin < t_best)
+        t_best[ok], kind[ok] = tmin[ok], k
+        hit[ok] = C + tmin[ok][..., None] * d[ok]
+
+    plane(2, 0.0, 1)  # pavimento
+    plane(1, depth, 2)  # parete di fondo
+    plane(0, 0.0, 3)  # parete sinistra
+    plane(2, 2700.0, 4)  # soffitto
+    plane(0, 4600.0, 9)  # parete destra
+    box((0, depth - 600, 0), (4000, depth, 860), 5)  # basi sul fondo
+    box((0, 900, 0), (600, depth, 860), 5)  # basi a sinistra
+    box((0, depth - 620, 860), (4000, depth, low_z), 6)  # piano di lavoro
+    box((0, 900, 860), (620, depth, low_z), 6)
+    box((0, depth - 350, top_z), (4000, depth, 2150), 7)  # pensili sul fondo
+    box((0, 900, top_z), (350, depth, 2150), 7)
+    socket = ((2560, depth - 12, 1080), (2680, depth, 1170))
+    box(*socket, 8)  # presa sul muro di fondo
+    vase = ((1700, depth - 330, low_z), (1830, depth - 200, low_z + 260))
+    box(*vase, 10)  # vaso sul piano, davanti al muro
+
+    rng = np.random.default_rng(seed)
+    light = 0.78 + 0.22 * np.exp(
+        -((np.linalg.norm(hit - np.array([2300, 1500, 2600]), axis=-1) / 2600) ** 2)
+    )
+    img = np.zeros((height, width, 3))
+    colors = {
+        1: (150, 132, 110),
+        2: (226, 221, 210),
+        3: (214, 209, 198),
+        4: (246, 244, 240),
+        5: (120, 132, 140),
+        6: (62, 58, 56),
+        7: (128, 140, 148),
+        8: (250, 250, 250),
+        9: (220, 215, 204),
+        10: (40, 120, 90),
+    }
+    for k, col in colors.items():
+        sel = kind == k
+        img[sel] = np.asarray(col) * light[sel, None]
+    # ombra dei pensili sul muro (più scuro appena sotto): la luce deve conservarla
+    under = ((kind == 2) | (kind == 3)) & (hit[..., 2] < top_z) & (hit[..., 2] > low_z)
+    shade = 1.0 - 0.3 * np.exp(-((top_z - hit[..., 2]) / 140.0))
+    img[under] *= shade[under, None]
+    img += rng.normal(0, 2.0, img.shape)
+    photo = np.clip(np.rint(img), 0, 255).astype(np.uint8)
+    photo = np.asarray(Image.fromarray(photo).filter(ImageFilter.GaussianBlur(0.5)), dtype=np.uint8)
+
+    band = (hit[..., 2] > low_z) & (hit[..., 2] < top_z)
+    back = (kind == 2) & band & (hit[..., 0] <= 4000)
+    left = (kind == 3) & band & (hit[..., 1] >= 900)
+    mask = ((back | left).astype(np.uint8)) * 255
+
+    def px(p: tuple[float, float, float]) -> tuple[float, float]:
+        q = K @ (R @ (np.asarray(p, float) - C))
+        return (float(q[0] / q[2]), float(q[1] / q[2]))
+
+    def bbox(
+        lo: tuple[float, float, float], hi: tuple[float, float, float]
+    ) -> tuple[int, int, int, int]:
+        pts = np.array(
+            [px((x, y, z)) for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
+        )
+        return (
+            int(np.floor(pts[:, 0].min())),
+            int(np.floor(pts[:, 1].min())),
+            int(np.ceil(pts[:, 0].max())),
+            int(np.ceil(pts[:, 1].max())),
+        )
+
+    walls: list[dict[str, object]] = [
+        {  # parete di fondo: da x=0 (spigolo) a x=4000
+            "angoli": [
+                px((0, depth, top_z)),
+                px((4000, depth, top_z)),
+                px((4000, depth, low_z)),
+                px((0, depth, low_z)),
+            ],
+            "larghezza_m": 4.0,
+            "altezza_m": (top_z - low_z) / 1000,
+        },  # fmt: skip
+        {  # parete sinistra: da y=900 (vicino) a y=3000 (spigolo)
+            "angoli": [
+                px((0, 900, top_z)),
+                px((0, depth, top_z)),
+                px((0, depth, low_z)),
+                px((0, 900, low_z)),
+            ],
+            "larghezza_m": (depth - 900) / 1000,
+            "altezza_m": (top_z - low_z) / 1000,
+        },  # fmt: skip
+    ]
+    return KitchenScene(photo, mask, walls, bbox(*socket), bbox(*vase), focal_35mm)

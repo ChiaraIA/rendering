@@ -196,6 +196,12 @@ class MaterialSpec(BaseModel):
         return (self.tile_w_mm + self.joint_mm, self.tile_h_mm + self.joint_mm)
 
 
+Surface = Literal["pavimento", "rivestimento"]
+"""Cosa si riveste: il pavimento, oppure una o più pareti (rivestimento a muro)."""
+
+PlaneKind = Literal["pavimento", "parete"]
+
+
 class FocalCheck(BaseModel):
     """Coerenza tra angoli cliccati, misure della stanza e focale EXIF."""
 
@@ -211,10 +217,17 @@ class FocalCheck(BaseModel):
 
 
 class PlaneGeometry(BaseModel):
-    """Stanza rettangolare L x W mm; H mappa il piano (mm) nell'immagine (px)."""
+    """Rettangolo reale L x W mm su un piano; H mappa il piano (mm) nell'immagine (px).
+
+    - `pavimento`: il rettangolo è la stanza (L = lunghezza, W = larghezza);
+    - `parete`: il rettangolo è la zona di muro da rivestire, con gli angoli in ordine
+      alto-sinistra, alto-destra, basso-destra, basso-sinistra: L = larghezza (asse u, verso
+      destra), W = altezza (asse v, verso il basso). Così le piastrelle restano dritte.
+    """
 
     model_config = ConfigDict(frozen=True)
 
+    kind: PlaneKind = "pavimento"
     corners_px: list[tuple[float, float]] = Field(min_length=4, max_length=4)
     length_mm: float = Field(gt=0)
     width_mm: float = Field(gt=0)
