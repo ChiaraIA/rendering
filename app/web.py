@@ -287,12 +287,19 @@ def _work_gallery(ws: Any) -> list[tuple[str, str]]:
         "prima_dopo": "prima/dopo",
         "materiale": "materiale",
         "luce": "luci e ombre",
+        "posa": "posa",
     }
+    # gli ingrandimenti che vedono i controllori: in una demo mostrano come si lavora sui bordi
+    details = {"_dettagli": " · ingrandimenti", "_bordi": " · bordi ingranditi"}
     out = []
     for p in sorted((ws.root / "lavoro").glob("*.jpg"), key=lambda q: q.stat().st_mtime):
-        stem = p.stem.rsplit("_", 1)[0]
-        if stem in labels:
-            out.append((str(p), f"{labels[stem]} {p.stem.rsplit('_', 1)[-1]}"))
+        name, extra = p.stem, ""
+        for suffix, text in details.items():
+            if name.endswith(suffix):
+                name, extra = name[: -len(suffix)], text
+        stem, _, number = name.rpartition("_")
+        if stem in labels and (extra or stem != "posa"):
+            out.append((str(p), f"{labels[stem]} {number}{extra}"))
     return out
 
 

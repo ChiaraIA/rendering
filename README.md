@@ -29,8 +29,10 @@ inserito è esattamente l'articolo del catalogo.
                                      CANCELLI NEL CODICE ─────────────►  consegna
 ```
 
-Per venderlo come abbonamento ai siti che lo integrano (clienti, chiavi API, piani, quote,
-widget, pagamenti): **[docs/SAAS.md](docs/SAAS.md)**.
+**Per cominciare:** [docs/MANUALE.md](docs/MANUALE.md) spiega come preparare e condurre una
+demo e come attivare un cliente, passo per passo. Il riferimento tecnico del servizio in
+abbonamento (clienti, chiavi API, piani, quote, widget, pagamenti) è in
+[docs/SAAS.md](docs/SAAS.md); il pentest in [docs/SICUREZZA.md](docs/SICUREZZA.md).
 
 ## Perché ci si può fidare del risultato
 
