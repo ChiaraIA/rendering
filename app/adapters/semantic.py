@@ -1,10 +1,10 @@
 """Segmentazione semantica delle superfici (opzionale): UperNet-ConvNeXt su ADE20K, licenza MIT.
 
-Riconosce, tra le 150 classi di ADE20K, quelle che servono a "posa": pavimento oggi,
-parete, piano di lavoro e mobili della cucina domani. Il modello lavora a bassa
-risoluzione (lato lungo 640 px); i bordi vengono poi rifiniti sulla foto vera con
-GrabCut, usando la probabilità del modello come guida: così le gambe di sedie e tavoli
-e le fessure tra un oggetto e l'altro seguono i contorni reali.
+Riconosce, tra le 150 classi di ADE20K, quelle che servono a "posa": pavimento, parete
+(per i rivestimenti) e piano di lavoro. Il modello lavora a risoluzione ridotta (lato
+lungo 896 px); i bordi vengono poi portati sui contorni reali della foto con un filtro
+guidato e ricalcolati alla risoluzione piena: così le gambe di sedie e tavoli e le fessure
+tra un oggetto e l'altro seguono i contorni veri.
 
 PyTorch e transformers sono importati solo quando serve: senza di loro il resto del
 programma funziona come prima (maschera disegnata dagli agenti).
@@ -21,10 +21,10 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-DEFAULT_MODEL = os.environ.get("POSA_SEG_MODEL", "openmmlab/upernet-convnext-tiny")
+DEFAULT_MODEL = os.environ.get("POSA_SEG_MODEL", "openmmlab/upernet-convnext-base")
 # versione esatta dei pesi (commit di Hugging Face): un repository alterato non cambia il
 # modello in uso. Si aggiorna di proposito, dopo averlo verificato.
-MODEL_REVISION = os.environ.get("POSA_SEG_REVISIONE", "876ffc56b819a829448f7e81e9f8606deef6fb65")
+MODEL_REVISION = os.environ.get("POSA_SEG_REVISIONE", "13a9c410ff779f25236a8d24802d2742e4694e9c")
 WORK_SIDE = 896  # lato lungo per il modello (multiplo di 32): più dettaglio su gambe e piedi
 REFINE_SIDE = 1600  # lato lungo per la rifinitura dei bordi
 
@@ -36,52 +36,37 @@ SURFACES = {
 }
 
 
-# oggetti che stanno SOPRA una superficie: dove il modello ha un dubbio fondato che ci sia
-# uno di questi, il pixel non è superficie (gambe sottili, piedi di mobili e sanitari)
-OBJECTS = (
-    "chair",
-    "seat",
-    "sofa",
-    "armchair",
-    "table",
-    "desk",
-    "bench",
-    "stool",
-    "coffee table",
-    "swivel chair",
-    "person",
-    "plant",
-    "pot",
-    "box",
-    "bag",
-    "cabinet",
-    "chest of drawers",
-    "bed",
-    "toilet",
-    "bathtub",
-    "sink",
-    "kitchen island",
-    "ottoman",
-    "cushion",
-    "case",
-    "basket",
-    "vase",
-    "radiator",
-    "fan",
-    "pole",
-    "column",
+# Classi che NON sono oggetti appoggiati o appesi a una superficie: tutto il resto (mobili,
+# sedie, vasi, elettrodomestici, quadri... 130 classi) "vince" sulla superficie quando il
+# modello ha un dubbio fondato. Misurato: con soglia 0,3 il rivestimento finito sopra gli
+# oggetti cala di un quinto, al prezzo di poca superficie in più da far aggiungere agli agenti.
+STRUCTURE = (
+    "wall",
+    "floor",
+    "ceiling",
+    "windowpane",
+    "door",
     "rug",
-    "television receiver",
-    "lamp",
-    "shelf",
-    "wardrobe",
-    "refrigerator",
-    "stove",
-    "oven",
-    "washer",
-    "dishwasher",
+    "stairs",
+    "stairway",
+    "step",
+    "column",
+    "countertop",
+    "counter",
+    "road",
+    "sidewalk",
+    "path",
+    "earth",
+    "grass",
+    "field",
+    "sand",
+    "land",
+    "dirt track",
 )
-OBJECT_THRESHOLD = 0.25
+OBJECT_THRESHOLD = 0.3
+# raggio del filtro che porta il bordo del modello sui contorni veri: ~19 px su 1600, cioè
+# recupera errori del modello fino a ~8 px (il modello lavora a 896 px)
+SNAP_FRACTION = 0.012
 
 
 def available() -> bool:
@@ -101,6 +86,13 @@ class Segmentation:
     def prob(self, names: tuple[str, ...], size: tuple[int, int]) -> NDArray[np.float32]:
         """Probabilità (somma delle classi) riportata a `size` = (larghezza, altezza)."""
         idx = [self.labels[n] for n in names if n in self.labels]
+        p = self.probs[idx].sum(axis=0)
+        return np.asarray(cv2.resize(p, size, interpolation=cv2.INTER_LINEAR), dtype=np.float32)
+
+    def object_prob(self, size: tuple[int, int]) -> NDArray[np.float32]:
+        """Probabilità che il pixel sia un oggetto (qualunque classe non strutturale)."""
+        structure = {self.labels[n] for n in STRUCTURE if n in self.labels}
+        idx = [i for i in range(self.probs.shape[0]) if i not in structure]
         p = self.probs[idx].sum(axis=0)
         return np.asarray(cv2.resize(p, size, interpolation=cv2.INTER_LINEAR), dtype=np.float32)
 
@@ -144,7 +136,19 @@ def surface_mask(
     seg: Segmentation | None = None,
     refine: bool = True,
 ) -> NDArray[np.uint8]:
-    """Maschera uint8 (0..255) della superficie, alla risoluzione della foto."""
+    """Maschera uint8 (0..255) della superficie, alla risoluzione della foto.
+
+    1. il modello dice DOVE è la superficie (probabilità oltre 0,5), e dove ha un dubbio
+       fondato che ci sia un oggetto (sedia, vaso, mobile...) l'oggetto vince;
+    2. il bordo viene portato sui contorni reali della foto (filtro guidato, solo in una
+       fascia stretta attorno al bordo del modello);
+    3. la maschera finale è calcolata alla risoluzione piena, con bordi di un pixel.
+    Misurato su 109 stanze vere con molti oggetti (ADE20K validation): rispetto alla
+    rifinitura precedente (GrabCut) meno rivestimento sopra gli oggetti e meno superficie
+    vecchia lasciata scoperta.
+    """
+    from app.core import masking
+
     h, w = image_rgb.shape[:2]
     seg = seg or segment(image_rgb)
     s = min(1.0, REFINE_SIDE / max(h, w))
@@ -153,40 +157,16 @@ def surface_mask(
         np.ascontiguousarray(image_rgb[..., :3]), (rw, rh), interpolation=cv2.INTER_AREA
     )
     p = seg.prob(SURFACES[surface], (rw, rh))
-    p_obj = seg.prob(OBJECTS, (rw, rh))
-    # gli oggetti "vincono": la probabilità di superficie si annulla dove c'è un oggetto
-    p = np.where(p_obj >= OBJECT_THRESHOLD, np.minimum(p, 0.3), p).astype(np.float32)
+    p = np.where(seg.object_prob((rw, rh)) >= OBJECT_THRESHOLD, np.minimum(p, 0.3), p)
+    p = p.astype(np.float32)
     hard = p >= 0.5
     if refine and hard.any() and not hard.all():
-        hard = _grabcut(work, p, near_objects=p_obj >= 0.1)
+        hard = masking.snap_to_edges(work, p, radius=max(3, round(SNAP_FRACTION * max(rw, rh))))
     hard = _clean(hard)
-    soft = cv2.GaussianBlur(hard.astype(np.float32), (0, 0), 0.7)
-    full = cv2.resize(soft, (w, h), interpolation=cv2.INTER_LINEAR)
-    out = np.clip(np.rint(full * 255), 0, 255).astype(np.uint8)
-    out[full < 0.02] = 0
-    return out
-
-
-def _grabcut(
-    rgb: NDArray[np.uint8], p: NDArray[np.float32], near_objects: NDArray[np.bool_] | None = None
-) -> NDArray[np.bool_]:
-    """GrabCut guidato dalla probabilità: il modello decide dove, la foto decide il bordo.
-    Vicino agli oggetti niente è "sicuro": lì GrabCut può ritagliare gambe e fessure."""
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    sure_fg = cv2.erode((p > 0.9).astype(np.uint8), k).astype(bool)
-    if near_objects is not None and near_objects.any():
-        k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
-        sure_fg &= ~cv2.dilate(near_objects.astype(np.uint8), k2).astype(bool)
-    sure_bg = cv2.erode((p < 0.1).astype(np.uint8), k).astype(bool)
-    gc = np.where(p >= 0.5, cv2.GC_PR_FGD, cv2.GC_PR_BGD).astype(np.uint8)
-    gc[sure_fg] = cv2.GC_FGD
-    gc[sure_bg] = cv2.GC_BGD
-    if not (gc == cv2.GC_FGD).any() or not (gc == cv2.GC_BGD).any():
-        return p >= 0.5
-    bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
-    cv2.setRNGSeed(0)
-    cv2.grabCut(np.ascontiguousarray(rgb[..., ::-1]), gc, None, bgd, fgd, 4, cv2.GC_INIT_WITH_MASK)
-    return np.isin(gc, (cv2.GC_FGD, cv2.GC_PR_FGD))
+    if not refine:
+        full = cv2.resize(hard.astype(np.uint8) * 255, (w, h), interpolation=cv2.INTER_LINEAR)
+        return np.asarray(full, dtype=np.uint8)
+    return masking.edge_alpha(image_rgb, hard)
 
 
 def _clean(mask: NDArray[np.bool_]) -> NDArray[np.bool_]:

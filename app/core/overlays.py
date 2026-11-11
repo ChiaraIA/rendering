@@ -92,35 +92,60 @@ def _erode(m: NDArray[np.bool_]) -> NDArray[np.bool_]:
     return e2
 
 
+def grid_step_mm(geom: PlaneGeometry) -> float:
+    """Lato dei quadrati della griglia di controllo: 50 cm a terra; sulle pareti dipende
+    dall'altezza della zona (una fascia di 60 cm ha bisogno di quadrati da 10 cm)."""
+    if geom.kind == "pavimento":
+        return 500.0
+    return 100.0 if geom.width_mm <= 1000 else 250.0 if geom.width_mm <= 2000 else 500.0
+
+
 def plane_grid_overlay(
-    img: Arr, geom: PlaneGeometry, mask: NDArray[np.uint8] | None, step_mm: float = 500.0
+    img: Arr,
+    geom: PlaneGeometry | list[PlaneGeometry],
+    mask: NDArray[np.uint8] | None,
+    step_mm: float | None = None,
 ) -> Arr:
-    """Quadrati di `step_mm` sul pavimento, proiettati con l'omografia: se la geometria è
-    giusta sembrano quadrati veri posati a terra, allineati ai muri."""
-    h_mat = np.asarray(geom.H)
+    """Quadrati di lato noto proiettati con l'omografia su ogni piano: se la geometria è
+    giusta sembrano quadrati veri appoggiati alla superficie, allineati ai suoi bordi."""
+    planes = geom if isinstance(geom, list) else [geom]
     h, w = img.shape[:2]
     layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    L, W = geom.length_mm, geom.width_mm
+    colors = [(255, 230, 0, 230), (0, 230, 255, 230), (255, 120, 255, 230)]
+    labels = []
+    for k, plane in enumerate(planes):
+        h_mat = np.asarray(plane.H)
+        L, W = plane.length_mm, plane.width_mm
+        step = step_mm or grid_step_mm(plane)
 
-    def proj(pts: NDArray[np.float64]) -> list[tuple[float, float]]:
-        p = np.c_[pts, np.ones(len(pts))] @ h_mat.T
-        ok = p[:, 2] > 1e-9 * np.abs(p[:, 2]).max()
-        q = p[ok, :2] / p[ok, 2:3]
-        return [(float(x), float(y)) for x, y in q]
+        def proj(
+            pts: NDArray[np.float64], h_mat: NDArray[np.float64] = h_mat
+        ) -> list[tuple[float, float]]:
+            p = np.c_[pts, np.ones(len(pts))] @ h_mat.T
+            ok = p[:, 2] > 1e-9 * np.abs(p[:, 2]).max()
+            q = p[ok, :2] / p[ok, 2:3]
+            return [(float(x), float(y)) for x, y in q]
 
-    n = 200
-    for u in np.arange(0, L + 1e-6, step_mm):
-        line = np.stack([np.full(n, u), np.linspace(0, W, n)], 1)
-        d.line(proj(line), fill=(255, 230, 0, 230), width=2)
-    for v in np.arange(0, W + 1e-6, step_mm):
-        line = np.stack([np.linspace(0, L, n), np.full(n, v)], 1)
-        d.line(proj(line), fill=(255, 230, 0, 230), width=2)
-    rect = np.array([[0, 0], [L, 0], [L, W], [0, W], [0, 0]], float)
-    pts = []
-    for a, b in zip(rect[:-1], rect[1:], strict=True):
-        pts += proj(np.linspace(a, b, n))
-    d.line(pts, fill=(255, 60, 60, 255), width=4)
+        n = 200
+        color = colors[k % len(colors)]
+        # pareti: le righe partono dal bordo inferiore, dove poggia la prima fila
+        v_lines = (
+            np.arange(0, W + 1e-6, step)
+            if plane.kind == "pavimento"
+            else W - np.arange(0, W + 1e-6, step)
+        )
+        for u in np.arange(0, L + 1e-6, step):
+            d.line(proj(np.stack([np.full(n, u), np.linspace(0, W, n)], 1)), fill=color, width=2)
+        for v in v_lines:
+            d.line(proj(np.stack([np.linspace(0, L, n), np.full(n, v)], 1)), fill=color, width=2)
+        rect = np.array([[0, 0], [L, 0], [L, W], [0, W], [0, 0]], float)
+        pts: list[tuple[float, float]] = []
+        for p0, p1 in zip(rect[:-1], rect[1:], strict=True):
+            pts += proj(np.linspace(p0, p1, n))
+        d.line(pts, fill=(255, 60, 60, 255), width=4)
+        what = "stanza" if plane.kind == "pavimento" else f"parete {k + 1}"
+        labels.append(f"{what} {L / 1000:.2f} x {W / 1000:.2f} m, quadrati {step / 10:.0f} cm")
     arr = np.asarray(layer, dtype=np.float32)
     if mask is not None:
         arr[..., 3] *= np.where(mask > 0, 1.0, 0.35)
@@ -128,14 +153,15 @@ def plane_grid_overlay(
     out = img[..., :3].astype(np.float32) * (1 - alpha) + arr[..., :3] * alpha
     pil = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
     dd = ImageDraw.Draw(pil)
-    dd.text(
-        (10, 10),
-        f"griglia {step_mm / 10:.0f} cm - stanza {L / 1000:.2f} x {W / 1000:.2f} m",
-        fill=(255, 255, 255),
-        font=_font(22),
-        stroke_width=3,
-        stroke_fill=(0, 0, 0),
-    )
+    for k, text in enumerate(labels):
+        dd.text(
+            (10, 10 + 28 * k),
+            text,
+            fill=colors[k % len(colors)][:3],
+            font=_font(22),
+            stroke_width=3,
+            stroke_fill=(0, 0, 0),
+        )
     return np.asarray(pil, dtype=np.uint8)
 
 
@@ -215,41 +241,54 @@ def tile_patch(
     return out
 
 
-def boundary_details(
-    img: Arr, mask: NDArray[np.uint8], n: int = 4, crop: tuple[int, int] = (300, 220), zoom: int = 2
-) -> Arr:
-    """Tavola con gli ingrandimenti delle zone dove il bordo della maschera è più complicato
-    (gambe di sedie e tavoli, piedi dei mobili, angoli): lì si vedono gli errori di contorno."""
+def detail_windows(
+    mask: NDArray[np.uint8],
+    n: int,
+    crop: tuple[int, int],
+    risk: NDArray[np.float32] | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """Finestre (x0, y0, larghezza, altezza) dove guardare da vicino, le più importanti
+    prima: dove il bordo della maschera è più fitto (gambe, piedi, oggetti) e dove la
+    mappa di rischio segnala un probabile errore. Senza sovrapposizioni."""
     h, w = mask.shape
     cw, ch = min(crop[0], w), min(crop[1], h)
     m = mask >= 128
     edge = (m ^ _erode(m)).astype(np.float32)
     edge[:3], edge[-3:], edge[:, :3], edge[:, -3:] = 0, 0, 0, 0  # il bordo della foto non conta
-    density = cv2.boxFilter(edge, -1, (cw, ch), normalize=False, borderType=cv2.BORDER_CONSTANT)
-    over = mask_overlay(img, mask)
-    tiles: list[Arr] = []
+    score = edge if risk is None else edge + 4.0 * risk.astype(np.float32)
+    density = cv2.boxFilter(score, -1, (cw, ch), normalize=False, borderType=cv2.BORDER_CONSTANT)
+    out: list[tuple[int, int, int, int]] = []
     for _ in range(n):
         y, x = np.unravel_index(int(np.argmax(density)), density.shape)
         if density[y, x] <= 0:
             break
         x0 = int(np.clip(x - cw // 2, 0, w - cw))
         y0 = int(np.clip(y - ch // 2, 0, h - ch))
-        tile = Image.fromarray(np.ascontiguousarray(over[y0 : y0 + ch, x0 : x0 + cw]))
-        tile = tile.resize((cw * zoom, ch * zoom), Image.Resampling.LANCZOS)
-        d = ImageDraw.Draw(tile)
-        d.text(
-            (8, 6),
-            f"dettaglio {len(tiles) + 1}  (x {x0}-{x0 + cw}, y {y0}-{y0 + ch})",
-            fill=(255, 255, 255),
-            font=_font(18),
-            stroke_width=3,
-            stroke_fill=(0, 0, 0),
-        )
-        tiles.append(np.asarray(tile, dtype=np.uint8))
+        out.append((x0, y0, cw, ch))
         density[max(0, y - ch) : y + ch, max(0, x - cw) : x + cw] = 0  # niente sovrapposizioni
-    if not tiles:
-        return over
-    cols = 2 if len(tiles) > 1 else 1
+    return out
+
+
+def _full_crop(
+    img: Arr, win: tuple[int, int, int, int], scale: float, size: tuple[int, int]
+) -> Arr:
+    """Ritaglio della finestra (coordinate della preview) preso dalla foto a piena
+    risoluzione: l'ingrandimento mostra dettaglio vero, non pixel della preview gonfiati."""
+    x0, y0, cw, ch = win
+    fx0, fy0 = round(x0 / scale), round(y0 / scale)
+    fx1, fy1 = round((x0 + cw) / scale), round((y0 + ch) / scale)
+    part = Image.fromarray(np.ascontiguousarray(img[fy0:fy1, fx0:fx1, :3]))
+    return np.asarray(part.resize(size, Image.Resampling.LANCZOS), dtype=np.uint8)
+
+
+def _to_scale(mask: NDArray[np.uint8], scale: float) -> NDArray[np.uint8]:
+    if scale >= 1.0:
+        return mask
+    size = (max(1, round(mask.shape[1] * scale)), max(1, round(mask.shape[0] * scale)))
+    return np.asarray(cv2.resize(mask, size, interpolation=cv2.INTER_AREA), dtype=np.uint8)
+
+
+def _sheet(tiles: list[Arr], cols: int) -> Arr:
     rows = (len(tiles) + cols - 1) // cols
     th, tw = tiles[0].shape[:2]
     sheet = np.full((rows * th + (rows - 1) * 8, cols * tw + (cols - 1) * 8, 3), 255, np.uint8)
@@ -259,43 +298,77 @@ def boundary_details(
     return sheet
 
 
-def light_details(
-    before: Arr, after: Arr, mask: NDArray[np.uint8], n: int = 3, crop: tuple[int, int] = (280, 180)
-) -> Arr:
-    """PRIMA | DOPO ingranditi dove il pavimento incontra oggetti e mobili (ombre, contatti).
+def _caption(tile: Arr, text: str) -> Arr:
+    pil = Image.fromarray(tile)
+    ImageDraw.Draw(pil).text(
+        (8, 6), text, fill=(255, 255, 255), font=_font(18), stroke_width=3, stroke_fill=(0, 0, 0)
+    )
+    return np.asarray(pil, dtype=np.uint8)
 
-    Le zone scelte sono quelle con più bordo pavimento-oggetto: lì si vede subito se le ombre
-    sotto tavoli, sedie e mobili sono rimaste, sparite o esagerate.
+
+def boundary_details(
+    img: Arr,
+    mask: NDArray[np.uint8],
+    n: int = 6,
+    crop: tuple[int, int] = (300, 220),
+    zoom: int = 2,
+    risk: NDArray[np.float32] | None = None,
+    scale: float = 1.0,
+) -> Arr:
+    """Tavola con gli ingrandimenti delle zone dove la maschera è più a rischio (gambe di
+    sedie e tavoli, piedi dei mobili, oggetti piccoli, bordi che non seguono un contorno).
+
+    `img` e `mask` sono a piena risoluzione; `scale` è il rapporto preview/originale: le
+    coordinate scritte su ogni dettaglio sono quelle della preview che gli agenti usano.
     """
-    h, w = mask.shape
-    cw, ch = min(crop[0], w), min(crop[1], h)
-    m = mask >= 128
-    edge = (m ^ _erode(m)).astype(np.float32)
-    edge[:3], edge[-3:], edge[:, :3], edge[:, -3:] = 0, 0, 0, 0
-    density = cv2.boxFilter(edge, -1, (cw, ch), normalize=False, borderType=cv2.BORDER_CONSTANT)
+    small_mask = _to_scale(mask, scale)
+    small_risk = None
+    if risk is not None:
+        small_risk = np.asarray(
+            cv2.resize(risk, (small_mask.shape[1], small_mask.shape[0])), dtype=np.float32
+        )
+    wins = detail_windows(small_mask, n, crop, small_risk)
+    if not wins:
+        return mask_overlay(resize_to_width(img, small_mask.shape[1])[0], small_mask)
+    tiles: list[Arr] = []
+    for k, win in enumerate(wins):
+        x0, y0, cw, ch = win
+        size = (cw * zoom, ch * zoom)
+        photo = _full_crop(img, win, scale, size)
+        fx0, fy0 = round(x0 / scale), round(y0 / scale)
+        fx1, fy1 = round((x0 + cw) / scale), round((y0 + ch) / scale)
+        part = Image.fromarray(np.ascontiguousarray(mask[fy0:fy1, fx0:fx1]))
+        m = np.asarray(part.resize(size, Image.Resampling.BILINEAR), dtype=np.uint8)
+        tile = mask_overlay(photo, m)
+        tiles.append(_caption(tile, f"dettaglio {k + 1}  (x {x0}-{x0 + cw}, y {y0}-{y0 + ch})"))
+    return _sheet(tiles, 2 if len(tiles) > 1 else 1)
+
+
+def light_details(
+    before: Arr,
+    after: Arr,
+    mask: NDArray[np.uint8],
+    n: int = 3,
+    crop: tuple[int, int] = (280, 180),
+    scale: float = 1.0,
+    zoom: int = 2,
+) -> Arr:
+    """PRIMA | DOPO ingranditi dove la superficie incontra oggetti e mobili (ombre, contatti,
+    bordi), presi dalla foto a piena risoluzione. `scale` = preview/originale."""
+    small_mask = _to_scale(mask, scale)
+    wins = detail_windows(small_mask, n, crop)
+    if not wins:
+        width = small_mask.shape[1]
+        return side_by_side(resize_to_width(before, width)[0], resize_to_width(after, width)[0])
     rows: list[Arr] = []
-    for _ in range(n):
-        y, x = np.unravel_index(int(np.argmax(density)), density.shape)
-        if density[y, x] <= 0:
-            break
-        x0 = int(np.clip(x - cw // 2, 0, w - cw))
-        y0 = int(np.clip(y - ch // 2, 0, h - ch))
-        pair = side_by_side(
-            before[y0 : y0 + ch, x0 : x0 + cw],
-            after[y0 : y0 + ch, x0 : x0 + cw],
-            (f"PRIMA (x {x0}, y {y0})", "DOPO"),
+    for win in wins:
+        x0, y0, cw, ch = win
+        size = (cw * zoom, ch * zoom)
+        rows.append(
+            side_by_side(
+                _full_crop(before, win, scale, size),
+                _full_crop(after, win, scale, size),
+                (f"PRIMA (x {x0}, y {y0})", "DOPO"),
+            )
         )
-        im = Image.fromarray(pair).resize(
-            (pair.shape[1] * 2, pair.shape[0] * 2), Image.Resampling.LANCZOS
-        )
-        rows.append(np.asarray(im, dtype=np.uint8))
-        density[max(0, y - ch) : y + ch, max(0, x - cw) : x + cw] = 0
-    if not rows:
-        return side_by_side(before, after)
-    width = max(r.shape[1] for r in rows)
-    sheet = np.full((sum(r.shape[0] for r in rows) + 8 * (len(rows) - 1), width, 3), 255, np.uint8)
-    y = 0
-    for r in rows:
-        sheet[y : y + r.shape[0], : r.shape[1]] = r
-        y += r.shape[0] + 8
-    return sheet
+    return _sheet(rows, 1)

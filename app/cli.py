@@ -22,7 +22,8 @@ def _room(value: str | None) -> tuple[float, float] | None:
         return float(a), float(b)
     except ValueError:
         raise typer.BadParameter(
-            "formato misure: LUNGHEZZAxLARGHEZZA in metri, es. 4.2x3.6"
+            "formato misure: LUNGHEZZAxLARGHEZZA in metri, es. 4.2x3.6 "
+            "(per una parete: LARGHEZZAxALTEZZA, es. 3.0x0.6)"
         ) from None
 
 
@@ -69,7 +70,7 @@ def verifica(
     ] = False,
     modelli: Annotated[
         bool,
-        typer.Option("--modelli", help="Scarica e prova il modello di segmentazione (~230 MB)"),
+        typer.Option("--modelli", help="Scarica e prova il modello di segmentazione (~470 MB)"),
     ] = False,
     modello: ModelOpt = None,
 ) -> None:
@@ -114,14 +115,43 @@ def run(
     ] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Cartella della pratica")] = None,
     modello: ModelOpt = None,
+    superficie: Annotated[
+        str,
+        typer.Option(
+            "--superficie",
+            help="pavimento (default) oppure rivestimento (parete, es. il paraschizzi "
+            "della cucina). Con rivestimento, --stanza è LARGHEZZAxALTEZZA della zona",
+        ),
+    ] = "pavimento",
+    zona: Annotated[
+        str,
+        typer.Option(
+            "--zona",
+            help="Solo rivestimento: automatica, paraschizzi (tra piano di lavoro e "
+            "pensili/finestre) o parete (parete intera)",
+        ),
+    ] = "automatica",
 ) -> None:
     """Esegue una pratica completa con il sistema multiagente."""
     from app.agents.orchestrator import run_job, start
 
+    if superficie not in ("pavimento", "rivestimento"):
+        raise typer.BadParameter("--superficie: pavimento o rivestimento")
+    if zona not in ("automatica", "paraschizzi", "parete"):
+        raise typer.BadParameter("--zona: automatica, paraschizzi o parete")
     _require_credentials()
     _set_model(modello)
     out = out or _default_out()
-    ws = start(foto, out, materiale, campione, _room(stanza), listener=typer.echo)
+    ws = start(
+        foto,
+        out,
+        materiale,
+        campione,
+        _room(stanza),
+        listener=typer.echo,
+        surface=superficie,  # type: ignore[arg-type]
+        zone=zona,  # type: ignore[arg-type]
+    )
     outcome = asyncio.run(run_job(ws, Catalog.load()))
     typer.echo("\n" + (outcome.summary or ""))
     if outcome.delivered:
@@ -134,17 +164,28 @@ def run(
 @app.command()
 def demo(
     out: Annotated[Path, typer.Option("--out")] = Path("pratiche/demo"),
-    materiale: Annotated[str, typer.Option("--materiale", "-m")] = "laminato-rovere-120x20",
+    materiale: Annotated[str | None, typer.Option("--materiale", "-m")] = None,
     modello: ModelOpt = None,
+    parete: Annotated[
+        bool, typer.Option("--parete", help="Demo del rivestimento a parete (cucina sintetica)")
+    ] = False,
 ) -> None:
-    """Genera una stanza sintetica ed esegue il sistema multiagente su quella."""
+    """Genera una stanza sintetica (o una cucina, con --parete) ed esegue il sistema su quella."""
     from app.devtools import synthetic
 
     out.parent.mkdir(parents=True, exist_ok=True)
+    cam = ("Demo", "Phone")
+    if parete:
+        photo = out.parent / f"{out.name}_cucina.jpg"
+        kitchen = synthetic.make_kitchen_scene(1600, 1200)
+        synthetic.save_image(kitchen.photo, photo, fmt="JPEG", focal_35mm=26, camera=cam)
+        code = materiale or "ceramica-blu-20x20"
+        run(photo, code, None, None, out, modello, "rivestimento", "paraschizzi")
+        return
     scene = synthetic.make_room_scene()
     photo = out.parent / f"{out.name}_stanza.jpg"
-    synthetic.save_image(scene.photo, photo, fmt="JPEG", focal_35mm=26, camera=("Demo", "Phone"))
-    run(photo, materiale, None, "4.2x3.6", out, modello)
+    synthetic.save_image(scene.photo, photo, fmt="JPEG", focal_35mm=26, camera=cam)
+    run(photo, materiale or "laminato-rovere-120x20", None, "4.2x3.6", out, modello)
 
 
 @app.command("catalogo")
@@ -382,7 +423,8 @@ def server(
     porta: Annotated[int, typer.Option("--porta", help="Porta HTTP")] = 8000,
     host: Annotated[str, typer.Option("--host", help="Indirizzo di ascolto")] = "127.0.0.1",
 ) -> None:
-    """Avvia il servizio per i negozi Shopify (API, coda delle pratiche, webhook)."""
+    """Avvia il servizio in abbonamento: API per i siti clienti e per i negozi Shopify,
+    widget, coda delle pratiche, webhook (vedi docs/SAAS.md)."""
     import uvicorn
 
     from app.server.api import create_app

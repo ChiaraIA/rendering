@@ -20,7 +20,7 @@ from PIL import Image
 from app.devtools import synthetic
 from app.server import shopify_auth as auth
 from app.server.api import create_app
-from app.server.jobs import shop_dir
+from app.server.jobs import JobRequest, tenant_dir
 from app.server.settings import Settings
 from app.storage import exporter
 
@@ -52,11 +52,19 @@ class FakeRunner:
         self.deliver = deliver
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, photo, work, article, room_m, catalog, on_step, timeout_s):  # type: ignore[no-untyped-def]
-        self.calls.append({"photo": photo, "article": article, "room": room_m})
-        on_step("posa")
+    def __call__(self, req: JobRequest) -> tuple[bool, float]:
+        self.calls.append(
+            {
+                "photo": req.photo,
+                "article": req.article,
+                "room": req.room_m,
+                "surface": req.surface,
+                "zone": req.zone,
+            }
+        )
+        req.on_step("posa")
         if self.deliver:
-            out = work / "consegna"
+            out = req.work / "consegna"
             out.mkdir(parents=True)
             Image.new("RGB", (64, 48), (120, 80, 60)).save(exporter.master_path(out))
             Image.new("RGB", (128, 48), (120, 80, 60)).save(out / "prima_dopo.jpg")
@@ -75,7 +83,7 @@ def _catalog(root: Path, domain: str) -> None:
 
 
 def shop_dir_for(root: Path, domain: str) -> Path:
-    return root / "negozi" / domain
+    return root / "clienti" / domain
 
 
 @pytest.fixture
@@ -233,11 +241,11 @@ def test_webhooks_signed_and_gdpr_redact(env) -> None:  # type: ignore[no-untype
     job = _upload(client, _token(client, OTHER)).json()["pratica"]
     assert _hook(client, "shop/redact", OTHER, {}, secret="falso").status_code == 401
     assert _hook(client, "app/uninstalled", SHOP, {}).status_code == 200
-    assert app.state.store.shop(SHOP).active is False
+    assert app.state.store.tenant(SHOP).active is False
     assert client.get(signed("/proxy/sessione", prodotto="gres-grigio")).status_code == 401
     assert _hook(client, "shop/redact", OTHER, {}).status_code == 200
-    assert app.state.store.shop(OTHER) is None
-    assert not shop_dir(st, OTHER).exists()
+    assert app.state.store.tenant(OTHER) is None
+    assert not tenant_dir(st, OTHER).exists()
     assert client.get(f"/api/pratiche/{job}").status_code == 404
 
 
@@ -247,7 +255,11 @@ def test_customer_sees_only_fixed_messages(env) -> None:  # type: ignore[no-unty
     job = _upload(client, _token(client)).json()["pratica"]
     app.state.jobs.run_now(job)
     body = client.get(f"/api/pratiche/{job}").json()
-    assert body == {"stato": "non_riuscito", "messaggio": "Serve un controllo manuale"}
+    assert body == {
+        "stato": "non_riuscito",
+        "messaggio": "Serve un controllo manuale",
+        "superficie": "pavimento",
+    }
 
 
 def test_retention_deletes_old_photos(env) -> None:  # type: ignore[no-untyped-def]
@@ -276,10 +288,10 @@ def test_webhook_replay_is_ignored_and_secrets_scrubbed(env, monkeypatch) -> Non
         "X-Shopify-Webhook-Id": "evento-1",
     }
     assert client.post("/webhooks/shopify", content=raw, headers=h).status_code == 200
-    assert app.state.store.shop(SHOP).active is False
-    app.state.store.set_active(SHOP, True)  # il negozio reinstalla
+    assert app.state.store.tenant(SHOP).active is False
+    app.state.store.set_status(SHOP, "attivo")  # il negozio reinstalla
     assert client.post("/webhooks/shopify", content=raw, headers=h).status_code == 200
-    assert app.state.store.shop(SHOP).active is True  # il replay non lo disattiva di nuovo
+    assert app.state.store.tenant(SHOP).active is True  # il replay non lo disattiva di nuovo
     import os
 
     monkeypatch.setenv("SHOPIFY_API_SECRET", "x" * 32)

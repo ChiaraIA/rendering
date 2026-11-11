@@ -1,4 +1,5 @@
 """Configurazione del servizio, solo da variabili d'ambiente (nessun segreto nel codice)."""
+# i limiti per cliente (quota mensile, superfici) stanno nei piani: vedi store.py
 
 from __future__ import annotations
 
@@ -17,7 +18,9 @@ class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("POSA_DATI", "dati")))
     # segreto dell'app Shopify (Partner Dashboard): firma App Proxy e webhook
     shopify_secret: str = field(default_factory=lambda: os.environ.get("SHOPIFY_API_SECRET", ""))
-    # token per le API di amministrazione (registrazione negozi)
+    # segreto dei webhook di Stripe (whsec_...): pagamenti -> attiva/sospende i clienti
+    stripe_secret: str = field(default_factory=lambda: os.environ.get("STRIPE_WEBHOOK_SECRET", ""))
+    # token per le API di amministrazione (clienti, piani, chiavi)
     admin_token: str = field(default_factory=lambda: os.environ.get("POSA_ADMIN_TOKEN", ""))
     # chiave per firmare i permessi di caricamento (generata se assente: vale fino al riavvio)
     upload_key: str = field(
@@ -42,14 +45,26 @@ class Settings:
     def scrub_environment(self) -> None:
         """Toglie i segreti del servizio dall'ambiente: i processi figli (le sessioni degli
         agenti) non li ereditano, quindi non sono raggiungibili nemmeno in teoria."""
-        for name in ("SHOPIFY_API_SECRET", "POSA_ADMIN_TOKEN", "POSA_CHIAVE_CARICAMENTI"):
+        for name in (
+            "SHOPIFY_API_SECRET",
+            "POSA_ADMIN_TOKEN",
+            "POSA_CHIAVE_CARICAMENTI",
+            "STRIPE_WEBHOOK_SECRET",
+        ):
             os.environ.pop(name, None)
 
     def check(self) -> list[str]:
         """Problemi di configurazione che impediscono di andare in produzione."""
         problems = []
         if len(self.shopify_secret) < 16:
-            problems.append("SHOPIFY_API_SECRET mancante: senza, nessuna richiesta è accettata")
+            problems.append("SHOPIFY_API_SECRET mancante: i negozi Shopify non possono collegarsi")
+        if not self.public_url.startswith("https://"):
+            problems.append("POSA_URL_PUBBLICO mancante o non https: il widget non può caricare")
+        if len(self.stripe_secret) < 16:
+            problems.append(
+                "STRIPE_WEBHOOK_SECRET assente: i pagamenti non attivano/sospendono i clienti "
+                "(si può fare a mano da /admin/clienti/<id>/stato)"
+            )
         if len(self.admin_token) < 24:
             problems.append("POSA_ADMIN_TOKEN mancante o troppo corto (minimo 24 caratteri)")
         if not os.environ.get("POSA_CHIAVE_CARICAMENTI"):

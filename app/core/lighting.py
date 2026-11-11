@@ -1,4 +1,5 @@
-"""Luci e ombre del nuovo pavimento, ricavate dalla foto (senza il disegno del vecchio).
+"""Luci e ombre della nuova superficie (pavimento o parete), ricavate dalla foto senza il
+disegno di quella vecchia.
 
 Tre livelli, tutti misurati sul vecchio pavimento dentro la maschera:
 1. luce d'ambiente a bassa frequenza (zone più illuminate e più buie della stanza);
@@ -18,7 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from app.core.colorspace import to_linear, trc_for
-from app.core.models import BBox, Finish, LightMap, LightParams, SourceImage
+from app.core.models import BBox, Finish, LightMap, LightParams, PlaneKind, SourceImage
 
 GAIN_MIN, GAIN_MAX = 0.35, 1.6
 WORK_SIDE = 256  # lato di lavoro: la luce è a bassa frequenza, non serve di più
@@ -125,8 +126,15 @@ SHADOW_MM = 18.0  # sfocatura delle ombre: morbide come nella foto, senza grana
 HIGHLIGHT_START = 1.1  # sopra il 110% della luce d'ambiente è riflesso, non luce
 
 
-def default_params(finish: Finish = "opaca") -> LightParams:
-    return LightParams(riflessi=REFLECTIONS_BY_FINISH.get(finish, 0.1))
+CONTACT_BY_KIND: dict[str, float] = {"pavimento": 0.6, "parete": 0.35}
+
+
+def default_params(finish: Finish = "opaca", kind: PlaneKind = "pavimento") -> LightParams:
+    """Valori di partenza: i riflessi dipendono dalla finitura; l'ombra di contatto è più
+    leggera sulle pareti (un muro non "regge" gli oggetti come un pavimento)."""
+    return LightParams(
+        riflessi=REFLECTIONS_BY_FINISH.get(finish, 0.1), contatto=CONTACT_BY_KIND.get(kind, 0.6)
+    )
 
 
 def _norm_blur(

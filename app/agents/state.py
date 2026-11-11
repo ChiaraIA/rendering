@@ -19,6 +19,7 @@ from app.core.models import (
     LightParams,
     MaskRecord,
     PlaneGeometry,
+    Surface,
 )
 
 Step = Literal["maschera", "geometria", "materiale", "luce", "posa"]
@@ -42,10 +43,18 @@ class Attempt(BaseModel):
     verdict: Verdict
 
 
+Zone = Literal["automatica", "paraschizzi", "parete"]
+
+
 class ClientRequest(BaseModel):
     material_id: str | None = None  # codice a catalogo scelto dal cliente
     sample_file: str | None = None  # foto di un campione (alternativa al codice)
-    room_mm: tuple[float, float] | None = None  # misure date dal cliente (lunghezza, larghezza)
+    # misure date dal cliente: pavimento = lunghezza x larghezza della stanza;
+    # rivestimento = larghezza x altezza della zona di parete da rivestire
+    room_mm: tuple[float, float] | None = None
+    surface: Surface = "pavimento"  # cosa rivestire: il pavimento o le pareti
+    # solo rivestimento: fascia tra piano di lavoro e pensili/finestre, o parete intera
+    zone: Zone = "automatica"
 
 
 class MaterialChoice(BaseModel):
@@ -79,8 +88,9 @@ class JobState(BaseModel):
     mask: MaskRecord | None = None  # solo se approvata
 
     geometry_attempts: list[Attempt] = []
-    geometry: PlaneGeometry | None = None  # solo se approvata
-    geometry_sha256: str | None = None
+    geometry: PlaneGeometry | None = None  # solo se approvata (primo piano)
+    more_planes: list[PlaneGeometry] = []  # rivestimento: le altre pareti (cucina ad angolo)
+    geometry_sha256: str | None = None  # di tutti i piani insieme
     room_estimated: bool = False
 
     material_attempts: list[Attempt] = []
@@ -98,6 +108,14 @@ class JobState(BaseModel):
     escalation: str | None = None
     events: list[str] = Field(default_factory=list)
     cost_usd: float = 0.0
+
+    @property
+    def planes(self) -> list[PlaneGeometry]:
+        return [self.geometry, *self.more_planes] if self.geometry else []
+
+    @property
+    def is_wall(self) -> bool:
+        return self.request.surface == "rivestimento"
 
     def attempts(self, step: Step) -> list[Attempt]:
         return {
@@ -124,7 +142,7 @@ def can_attempt(state: JobState, step: Step) -> str | None:
 def missing_for_render(state: JobState) -> list[str]:
     missing = []
     if state.mask is None:
-        missing.append("maschera del pavimento approvata dal controllore")
+        missing.append("maschera della superficie approvata dal controllore")
     if state.geometry is None:
         missing.append("geometria approvata dal controllore")
     if state.material is None:
@@ -168,7 +186,7 @@ def next_step(state: JobState) -> str:
     if state.delivered:
         return "completato: risultato consegnato"
     if state.mask is None:
-        return "maschera: delega all'agente 'pavimento'"
+        return f"maschera: delega all'agente '{'parete' if state.is_wall else 'pavimento'}'"
     if state.geometry is None:
         return "geometria: delega all'agente 'geometra'"
     if state.material is None:

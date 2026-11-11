@@ -1,4 +1,5 @@
-# Servizio "posa" per i negozi Shopify (API + agenti + render). Niente Gradio: Pillow >= 13.
+# Servizio "posa" in abbonamento (API per siti e negozi Shopify + agenti + render).
+# Niente Gradio: Pillow >= 13.
 ARG BASE=python:3.12-slim
 FROM ${BASE} AS base
 

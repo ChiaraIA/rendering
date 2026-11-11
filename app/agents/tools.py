@@ -39,7 +39,15 @@ from app.core.compositor import CompositeResult
 from app.core.errors import CatalogError, GeometryError
 from app.core.ingest import sha256_bytes
 from app.core.masking import Polygon
-from app.core.models import LayoutStats, LightParams, MaskOrigin, MaterialLayer, ValidationReport
+from app.core.models import (
+    LayoutStats,
+    LightParams,
+    MaskOrigin,
+    MaterialLayer,
+    PlaneGeometry,
+    PlaneKind,
+    ValidationReport,
+)
 from app.storage import exporter
 from app.storage.workspace import Workspace
 
@@ -47,15 +55,17 @@ Result = dict[str, Any]
 Segmenter = Callable[[NDArray[np.uint8]], NDArray[np.uint8]]
 
 
-def _default_segmenter() -> Segmenter | None:
-    """Modello di segmentazione se installato (PyTorch + transformers), altrimenti None."""
+def _default_segmenter(surface: str = "pavimento") -> Segmenter | None:
+    """Modello di segmentazione se installato (PyTorch + transformers), altrimenti None.
+    Per i rivestimenti riconosce il muro, per i pavimenti il pavimento."""
     import os
 
     from app.adapters import semantic
 
     if os.environ.get("POSA_SEGMENTAZIONE", "1") == "0" or not semantic.available():
         return None
-    return lambda img: semantic.surface_mask(img, "pavimento")
+    target = "parete" if surface == "rivestimento" else "pavimento"
+    return lambda img: semantic.surface_mask(img, target)
 
 
 MAX_ATTEMPTS = config.MAX_ATTEMPTS
@@ -63,6 +73,8 @@ MAX_ATTEMPTS = config.MAX_ATTEMPTS
 
 MAX_POLYGONS = 40  # limiti sugli argomenti degli agenti: anche un agente manipolato
 MAX_POINTS = 400  # non può far lavorare il server all'infinito
+MAX_BOXES = 40
+MAX_PLANES = 3  # pareti di un rivestimento (cucina a L o a U)
 MAX_TEXT = 2000
 
 
@@ -86,6 +98,23 @@ def _polys(raw: Any) -> list[Polygon]:
     return out
 
 
+def _boxes(raw: Any) -> list[tuple[float, float, float, float]]:
+    """Riquadri [x0, y0, x1, y1] attorno agli oggetti da escludere."""
+    raw = raw or []
+    if not isinstance(raw, list) or len(raw) > MAX_BOXES:
+        raise ArgumentError(f"al massimo {MAX_BOXES} riquadri")
+    out = []
+    for box in raw:
+        if not isinstance(box, list | tuple) or len(box) != 4:
+            raise ArgumentError("ogni riquadro è [x0, y0, x1, y1]")
+        x0, y0, x1, y1 = (float(v) for v in box)
+        if not all(math.isfinite(c) and abs(c) < 1e6 for c in (x0, y0, x1, y1)):
+            raise ArgumentError("coordinate non valide")
+        if abs(x1 - x0) >= 2 and abs(y1 - y0) >= 2:
+            out.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+    return out
+
+
 class Toolbox:
     def __init__(
         self,
@@ -99,11 +128,13 @@ class Toolbox:
         self.checker = checker
         self._result: CompositeResult | None = None
         self._validation: ValidationReport | None = None
+        self.prompts = prompts.for_surface(ws.state.request.surface)
         if segmenter == "auto":
-            segmenter = _default_segmenter()
+            segmenter = _default_segmenter(ws.state.request.surface)
         self.segmenter: Segmenter | None = segmenter if callable(segmenter) else None
         self._auto_mask: NDArray[np.uint8] | None = None
         self._layer: tuple[tuple[str, str, str], MaterialLayer] | None = None
+        self._labels: tuple[str, NDArray[np.uint8]] | None = None  # piano di ogni pixel
 
     # ------------------------------------------------------------------ supporto
     @property
@@ -170,10 +201,14 @@ class Toolbox:
                 "preview_con_righello": "preview_griglia.jpg",
                 "dimensioni_preview_px": list(s.preview_size),
             },
+            "superficie": req.surface,
             "richiesta_cliente": {
+                "zona": req.zone if s.is_wall else None,
                 "codice_materiale": req.material_id,
                 "foto_campione": req.sample_file,
-                "misure_stanza_m": [round(x / 1000, 3) for x in req.room_mm]
+                ("misure_zona_parete_m" if s.is_wall else "misure_stanza_m"): [
+                    round(x / 1000, 3) for x in req.room_mm
+                ]
                 if req.room_mm
                 else None,
             },
@@ -193,13 +228,52 @@ class Toolbox:
 
     # ------------------------------------------------------------------ maschera
     async def _automatic_mask(self) -> NDArray[np.uint8] | None:
-        """Maschera del pavimento dal modello di segmentazione (calcolata una volta)."""
+        """Maschera della superficie dal modello di segmentazione (calcolata una volta)."""
         if self.segmenter is None:
             return None
         if self._auto_mask is None:
-            self.ws.log("🧠 segmentazione automatica del pavimento…")
+            what = "della parete" if self.state.is_wall else "del pavimento"
+            self.ws.log(f"🧠 segmentazione automatica {what}…")
             self._auto_mask = await asyncio.to_thread(self.segmenter, self.ws.source.pixels)
         return self._auto_mask
+
+    def _build_mask(
+        self,
+        auto: NDArray[np.uint8] | None,
+        include: list[Polygon],
+        exclude: list[Polygon],
+        limit: list[Polygon],
+        boxes: list[tuple[float, float, float, float]],
+        refine_edges: bool,
+    ) -> NDArray[np.uint8]:
+        """Maschera definitiva dalle parti: modello + correzioni degli agenti.
+
+        Gli agenti dicono COSA e DOVE (poligoni approssimativi, riquadri attorno agli
+        oggetti); i contorni li decide il codice sulla foto a piena risoluzione.
+        """
+        src = self.ws.source
+        shape = src.shape_hw
+        corrected = bool(include or exclude or limit or boxes)
+        if auto is not None and not corrected:
+            return masking.readonly_mask(auto)  # il modello ha già bordi a piena risoluzione
+        binary = auto >= 128 if auto is not None else np.zeros(shape, bool)
+        if limit:
+            binary = binary & (masking.rasterize(shape, limit) >= 128)
+        if include:
+            binary = binary | (masking.rasterize(shape, include) >= 128)
+        if exclude:
+            binary = binary & ~(masking.rasterize(shape, exclude) >= 128)
+        before_boxes = binary.copy()  # ogni riquadro è giudicato sulla stessa superficie
+        for box in boxes:
+            binary = binary & ~masking.object_in_box(src.pixels, box, before_boxes)
+        if not refine_edges:
+            return masking.readonly_mask(np.where(binary, 255, 0).astype(np.uint8))
+        # i bordi disegnati a mano si portano sui contorni veri; il lato libero di `area`
+        # (dove il rivestimento finisce in mezzo al muro) resta la linea voluta dall'agente
+        # (un poligono disegnato da un agente sbaglia fino a ~1,5% del lato della foto)
+        reach = max(4.0, 0.015 * max(shape))
+        zone = masking.outline_zone(shape, [*include, *exclude], round(2 * reach))
+        return masking.finalize(src.pixels, binary, zone if zone.any() else None, reach)
 
     async def proponi_maschera(
         self,
@@ -208,39 +282,43 @@ class Toolbox:
         rifinisci: bool = True,
         base: str = "automatica",
         area: Any = None,
+        escludi_oggetti: Any = None,
+        aggiungi: Any = None,
     ) -> Result:
         """`base="automatica"`: parte dal modello di segmentazione; `area` la limita a una
-        zona, `pavimento` aggiunge zone, `escludi` ne toglie. `base="poligoni"`: solo poligoni."""
+        zona, `aggiungi` (o `pavimento`) aggiunge zone, `escludi` ne toglie, `escludi_oggetti`
+        toglie l'oggetto contenuto in ogni riquadro. `base="poligoni"`: solo le correzioni."""
         if block := can_attempt(self.state, "maschera"):
             return {"errore": block}
         src = self.ws.source
         try:
-            include = [self.ws.to_full(p) for p in _polys(pavimento)]
+            include = [self.ws.to_full(p) for p in [*_polys(pavimento), *_polys(aggiungi)]]
             exclude = [self.ws.to_full(p) for p in _polys(escludi)]
             limit = [self.ws.to_full(p) for p in _polys(area)]
+            s_prev = self.state.preview_scale
+            boxes = [
+                (x0 / s_prev, y0 / s_prev, x1 / s_prev, y1 / s_prev)
+                for x0, y0, x1, y1 in _boxes(escludi_oggetti)
+            ]
         except (ArgumentError, TypeError, ValueError, IndexError) as exc:
-            return {"errore": f"poligoni non validi: {exc}"}
+            return {"errore": f"correzioni non valide: {exc}"}
         auto = await self._automatic_mask() if base == "automatica" else None
         note = ""
         if base == "automatica" and auto is None:
             note = "segmentazione automatica non disponibile: uso solo i poligoni"
+        if auto is None and not include:
+            return {"errore": "serve almeno un poligono della superficie con 3 o più punti"}
+        if self.state.is_wall and auto is not None and not (limit or include):
+            return {
+                "errore": "per una parete serve `area`: i poligoni che racchiudono la zona di "
+                "muro da rivestire (il modello riconosce tutti i muri della foto)"
+            }
+        mask = await asyncio.to_thread(
+            self._build_mask, auto, include, exclude, limit, boxes, rifinisci
+        )
         if auto is not None:
-            mask = auto.copy()
-            if limit:
-                mask = np.minimum(mask, masking.rasterize(src.shape_hw, limit))
-            if include:
-                mask = np.maximum(mask, masking.rasterize(src.shape_hw, include))
-            if exclude:
-                mask = np.minimum(mask, 255 - masking.rasterize(src.shape_hw, exclude))
-            mask = masking.readonly_mask(mask)
             origin = MaskOrigin.SEMANTIC
         else:
-            if not include:
-                return {"errore": "serve almeno un poligono 'pavimento' con 3 o più punti"}
-            coarse = masking.rasterize(src.shape_hw, include, exclude)
-            mask = (
-                await asyncio.to_thread(masking.refine, src.pixels, coarse) if rifinisci else coarse
-            )
             origin = MaskOrigin.REFINED if rifinisci else MaskOrigin.POLYGON
         area_frac = float(np.count_nonzero(mask >= 128)) / mask.size
         if area_frac < 0.01:
@@ -253,95 +331,183 @@ class Toolbox:
         overlay = self.ws.write_image(
             overlays.mask_overlay(prev_img, prev_mask), f"maschera_{n}.jpg"
         )
+        # ingrandimenti dalla foto originale, scelti dove un errore è più probabile
+        risk = await asyncio.to_thread(masking.risk_map, src.pixels, mask)
         details = self.ws.write_image(
-            overlays.boundary_details(prev_img, prev_mask), f"maschera_{n}_dettagli.jpg"
+            overlays.boundary_details(src.pixels, mask, risk=risk, scale=self.state.preview_scale),
+            f"maschera_{n}_dettagli.jpg",
         )
         how = "automatica" if origin is MaskOrigin.SEMANTIC else "da poligoni"
-        self.ws.log(f"🟦 pavimento: maschera #{n} {how} ({area_frac:.0%} della foto)")
+        who = "🧱 parete" if self.state.is_wall else "🟦 pavimento"
+        fixes = len(include) + len(exclude) + len(limit) + len(boxes)
+        self.ws.log(
+            f"{who}: maschera #{n} {how} ({area_frac:.0%} della foto"
+            + (f", {fixes} correzioni" if fixes else "")
+            + ")"
+        )
+        context = f"Dati: la maschera copre il {area_frac:.1%} della foto."
+        if self.state.is_wall:
+            context += f" Zona richiesta dal cliente: {self.state.request.zone}."
         verdict = await self._check(
             CheckRequest(
                 "controllo-maschera",
-                prompts.CHECK_MASK,
+                self.prompts.check_mask,
                 ["preview.jpg", overlay, details],
-                f"Dati: la maschera copre il {area_frac:.1%} della foto.",
+                context,
             )
         )
         att = self._record("maschera", sha, overlay, verdict)
         if verdict.approved:
             rec = masking.make_record(mask, src.meta.normalized_sha256, origin)
             self.state.mask = masking.approve(rec, mask, verdict.checker)
+            self._drop_geometry_if_behind(mask)
             self.ws.persist()
         extra: Result = {"dettagli": details}
         if note:
             extra["nota"] = note
         return self._reply("maschera", att, extra)
 
+    def _drop_geometry_if_behind(self, mask: NDArray[np.uint8]) -> None:
+        """Una maschera nuova (rifatta dopo la revisione) deve stare davanti alla geometria
+        già approvata; se non è così la geometria va rifatta."""
+        planes = self.state.planes
+        if not planes:
+            return
+        try:
+            geometry.check_planes_in_front(planes, geometry.assign_planes(planes, mask.shape), mask)
+        except GeometryError:
+            self.state.geometry, self.state.more_planes = None, []
+            self.state.geometry_sha256 = None
+            self.ws.log("📐 la nuova maschera esce dalla geometria approvata: geometria da rifare")
+
     # ----------------------------------------------------------------- geometria
     async def proponi_geometria(
         self, angoli: Any, lunghezza_m: float | None = None, larghezza_m: float | None = None
     ) -> Result:
+        """Pavimento: i 4 angoli della stanza e le sue misure."""
+        if self.state.is_wall:
+            return {"errore": "questa pratica riveste una parete: usa proponi_geometria_parete"}
+        return await self._propose_planes(
+            [{"angoli": angoli, "lunghezza_m": lunghezza_m, "larghezza_m": larghezza_m}]
+        )
+
+    async def proponi_geometria_parete(self, pareti: Any) -> Result:
+        """Rivestimento: per ogni parete i 4 angoli di un rettangolo sul muro (alto-sx,
+        alto-dx, basso-dx, basso-sx) con larghezza e altezza reali."""
+        if not self.state.is_wall:
+            return {"errore": "questa pratica riveste il pavimento: usa proponi_geometria"}
+        if not isinstance(pareti, list) or not 1 <= len(pareti) <= MAX_PLANES:
+            return {
+                "errore": f"pareti: da 1 a {MAX_PLANES} elementi {{angoli, larghezza_m, altezza_m}}"
+            }
+        specs = []
+        for w in pareti:
+            if not isinstance(w, dict):
+                return {"errore": "ogni parete è un oggetto {angoli, larghezza_m, altezza_m}"}
+            specs.append(
+                {
+                    "angoli": w.get("angoli"),
+                    "lunghezza_m": w.get("larghezza_m"),
+                    "larghezza_m": w.get("altezza_m"),
+                }
+            )
+        return await self._propose_planes(specs)
+
+    async def _propose_planes(self, specs: list[dict[str, Any]]) -> Result:
         if block := can_attempt(self.state, "geometria"):
             return {"errore": block}
         if self.state.mask is None:
             return {"errore": "prima serve la maschera approvata"}
-        try:
-            pts = [(float(p[0]), float(p[1])) for p in angoli]
-        except (TypeError, ValueError, IndexError):
-            return {"errore": "angoli: servono 4 punti [x, y]"}
-        if len(pts) != 4:
-            return {"errore": "angoli: servono esattamente 4 punti [x, y]"}
+        wall = self.state.is_wall
+        kind: PlaneKind = "parete" if wall else "pavimento"
+        names = ("larghezza_m", "altezza_m") if wall else ("lunghezza_m", "larghezza_m")
         req = self.state.request
-        estimated = req.room_mm is None
-        if req.room_mm:
-            length, width = req.room_mm
-        elif lunghezza_m and larghezza_m:
-            length, width = float(lunghezza_m) * 1000, float(larghezza_m) * 1000
-        else:
-            return {"errore": "il cliente non ha dato le misure: stima lunghezza_m e larghezza_m"}
         src = self.ws.source
+        mask = self.ws.mask(self.state.mask.mask_sha256)
+        planes: list[PlaneGeometry] = []
+        estimated = False
+        for k, spec in enumerate(specs):
+            try:
+                pts = [(float(p[0]), float(p[1])) for p in spec["angoli"]]
+            except (TypeError, ValueError, IndexError, KeyError):
+                return {"errore": "angoli: servono 4 punti [x, y]"}
+            if len(pts) != 4:
+                return {"errore": "angoli: servono esattamente 4 punti [x, y]"}
+            if req.room_mm and k == 0:  # le misure del cliente valgono per il primo piano
+                length, width = req.room_mm
+            else:
+                try:
+                    length = float(spec["lunghezza_m"]) * 1000
+                    width = float(spec["larghezza_m"]) * 1000
+                except (TypeError, ValueError, KeyError):
+                    return {
+                        "errore": f"il cliente non ha dato le misure: stima {names[0]} e {names[1]}"
+                    }
+                estimated = True
+            limit = 30_000 if not wall else 20_000
+            if not (math.isfinite(length) and math.isfinite(width)) or not (
+                100 <= length <= limit and 100 <= width <= limit
+            ):
+                return {"errore": f"misure non plausibili: {names[0]} e {names[1]} in metri"}
+            try:
+                planes.append(
+                    geometry.room_geometry(
+                        self.ws.to_full(pts),
+                        length,
+                        width,
+                        (src.meta.width, src.meta.height),
+                        src.meta.focal_35mm,
+                        kind=kind,
+                    )
+                )
+            except GeometryError as exc:
+                where = f" (parete {k + 1})" if len(specs) > 1 else ""
+                return self._code_reject("geometria", f"geometria non valida{where}: {exc}")
         try:
-            geom = geometry.room_geometry(
-                self.ws.to_full(pts),
-                length,
-                width,
-                (src.meta.width, src.meta.height),
-                src.meta.focal_35mm,
-            )
-            geometry.check_mask_in_front(geom, self.ws.mask(self.state.mask.mask_sha256))
+            labels = geometry.assign_planes(planes, src.shape_hw)
+            geometry.check_planes_in_front(planes, labels, mask)
         except GeometryError as exc:
             return self._code_reject("geometria", f"geometria non valida: {exc}")
         n = len(self.state.geometry_attempts) + 1
         s = self.state.preview_scale
-        h_prev = (np.diag([s, s, 1.0]) @ np.asarray(geom.H)).tolist()
-        mask_prev = self.ws.preview_of(self.ws.mask(self.state.mask.mask_sha256))
+        prev_planes = [
+            pl.model_copy(update={"H": (np.diag([s, s, 1.0]) @ np.asarray(pl.H)).tolist()})
+            for pl in planes
+        ]
         overlay = self.ws.write_image(
             overlays.plane_grid_overlay(
-                self.ws.preview_of(src.pixels), geom.model_copy(update={"H": h_prev}), mask_prev
+                self.ws.preview_of(src.pixels), prev_planes, self.ws.preview_of(mask)
             ),
             f"geometria_{n}.jpg",
         )
-        f = geom.focal
-        focal_txt = f.message
-        if f.consistent is not None:
-            focal_txt += (
-                f" (angolo tra i muri implicito {f.axes_angle_deg:.1f}°, errore sul "
-                f"rapporto lunghezza/larghezza {f.aspect_error:+.0%})"
-            )
-        self.ws.log(
-            f"📐 geometra: proposta #{n}, stanza {length / 1000:.2f} x {width / 1000:.2f} m"
-            + (" (stimata)" if estimated else "")
+        focal_notes = []
+        for k, pl in enumerate(planes):
+            f = pl.focal
+            txt = f.message
+            if f.consistent is not None:
+                txt += (
+                    f" (angolo tra i lati implicito {f.axes_angle_deg:.1f}°, errore sul "
+                    f"rapporto tra le due misure {f.aspect_error:+.0%})"
+                )
+            focal_notes.append(txt if len(planes) == 1 else f"parete {k + 1}: {txt}")
+        focal_txt = "; ".join(focal_notes)
+        sizes = ", ".join(
+            f"{pl.length_mm / 1000:.2f} x {pl.width_mm / 1000:.2f} m" for pl in planes
         )
+        what = ("pareti " if len(planes) > 1 else "parete ") if wall else "stanza "
+        self.ws.log(
+            f"📐 geometra: proposta #{n}, {what}{sizes}" + (" (stimata)" if estimated else "")
+        )
+        origin = "stimate dall'agente" if estimated else "misure del cliente"
         verdict = await self._check(
             CheckRequest(
                 "controllo-geometria",
-                prompts.CHECK_GEOMETRY,
+                self.prompts.check_geometry,
                 ["preview.jpg", overlay],
-                f"Dati: stanza {length / 1000:.2f} x {width / 1000:.2f} m "
-                f"({'stimata dall agente' if estimated else 'misure del cliente'}). "
-                f"Coerenza con la focale EXIF: {focal_txt}.",
+                f"Dati: {what}{sizes} ({origin}). Coerenza con la focale EXIF: {focal_txt}.",
             )
         )
-        if verdict.approved and f.consistent is False:
+        if verdict.approved and any(pl.focal.consistent is False for pl in planes):
             verdict = verdict.model_copy(
                 update={
                     "approved": False,
@@ -350,10 +516,10 @@ class Toolbox:
                 }
             )
             self.ws.log("❌ controllo-automatico: incoerenza con la focale della fotocamera")
-        sha = sha256_bytes(geom.model_dump_json().encode())
+        sha = sha256_bytes("".join(pl.model_dump_json() for pl in planes).encode())
         att = self._record("geometria", sha, overlay, verdict)
         if verdict.approved:
-            self.state.geometry = geom
+            self.state.geometry, self.state.more_planes = planes[0], planes[1:]
             self.state.geometry_sha256 = sha
             self.state.room_estimated = estimated
             self.ws.persist()
@@ -408,6 +574,11 @@ class Toolbox:
         except CatalogError as exc:
             return {"errore": str(exc)}
         req = self.state.request
+        if req.surface not in spec.uses:
+            return {
+                "errore": f"l'articolo {spec.id} non è adatto a: {req.surface} "
+                f"(uso previsto: {', '.join(spec.uses)})"
+            }
         if req.material_id:
             if codice != req.material_id:
                 return {"errore": f"il cliente ha scelto il codice {req.material_id!r}: usa quello"}
@@ -477,7 +648,9 @@ class Toolbox:
             if v is not None
         }
         try:
-            params = LightParams(**(lighting.default_params(spec.finish).model_dump() | given))
+            kind: PlaneKind = "parete" if s.is_wall else "pavimento"
+            base = lighting.default_params(spec.finish, kind)
+            params = LightParams(**(base.model_dump() | given))
         except ValueError as exc:
             return {"errore": f"parametri di luce non validi: {exc}"}
         n = len(s.light_attempts) + 1
@@ -491,13 +664,15 @@ class Toolbox:
         after = self.ws.preview_of(result.pixels)
         ba = self.ws.write_image(overlays.side_by_side(before, after), f"luce_{n}.jpg")
         details = self.ws.write_image(
-            overlays.light_details(before, after, self.ws.preview_of(result.alpha)),
+            overlays.light_details(
+                self.ws.source.pixels, result.pixels, result.alpha, scale=s.preview_scale
+            ),
             f"luce_{n}_dettagli.jpg",
         )
         verdict = await self._check(
             CheckRequest(
                 "controllo-luce",
-                prompts.CHECK_LIGHT,
+                self.prompts.check_light,
                 [ba, details],
                 f"Materiale: {spec.name}, finitura {spec.finish}. Regolazioni proposte: "
                 f"{params.model_dump()}. Motivazione dell'agente: {motivazione or '-'}",
@@ -518,11 +693,12 @@ class Toolbox:
         key = (s.mask.mask_sha256, s.geometry_sha256 or "", s.material.material_id)
         if self._layer is None or self._layer[0] != key:
             spec = self.catalog.get(s.material.material_id)
-            layer = material.tiled_layer(
+            layer = material.surface_layer(
                 spec,
                 self.catalog.load_variants(spec),
                 src,
-                s.geometry,
+                s.planes,
+                self._plane_labels(),
                 self.ws.mask(s.mask.mask_sha256),
                 material.derive_seed(src.meta.normalized_sha256, spec.id),
                 supersampling=config.SUPERSAMPLING,
@@ -530,12 +706,20 @@ class Toolbox:
             self._layer = (key, layer)
         return self._layer[1]
 
+    def _plane_labels(self) -> NDArray[np.uint8]:
+        """Piano (parete) a cui appartiene ogni pixel, per la geometria approvata."""
+        key = self.state.geometry_sha256 or ""
+        if self._labels is None or self._labels[0] != key:
+            labels = geometry.assign_planes(self.state.planes, self.ws.source.shape_hw)
+            self._labels = (key, labels)
+        return self._labels[1]
+
     def _composite_sync(self, params: LightParams) -> CompositeResult:
         s, src = self.state, self.ws.source
         assert s.mask and s.geometry
         mask = self.ws.mask(s.mask.mask_sha256)
         layer = self._material_layer()
-        ppm = geometry.px_per_mm_map(s.geometry, layer.bbox)
+        ppm = geometry.px_per_mm_map_multi(s.planes, self._plane_labels(), layer.bbox)
         light = lighting.scene_light(src, mask, layer.bbox, ppm, params)
         return compositor.composite(src, mask, s.mask, layer, light)
 
@@ -548,8 +732,16 @@ class Toolbox:
         result = self._composite_sync(s.light)
         copy = self.ws.root / "originale" / s.image.source_name
         report = validator.validate(src, result, mask, s.mask, copy)
-        lo, hi = geometry.px_per_mm_range(s.geometry, mask)
-        whole, cut = material.count_tiles(spec, s.geometry.length_mm, s.geometry.width_mm)
+        labels = self._plane_labels()
+        lo, hi, whole, cut = float("inf"), 0.0, 0, 0
+        for k, plane in enumerate(s.planes):
+            part = mask if len(s.planes) == 1 else np.where(labels == k, mask, 0).astype(np.uint8)
+            p_lo, p_hi = geometry.px_per_mm_range(plane, part)
+            if p_hi > 0:
+                lo, hi = min(lo, p_lo), max(hi, p_hi)
+            w_, c_ = material.count_tiles(spec, plane.length_mm, plane.width_mm, plane.kind)
+            whole, cut = whole + w_, cut + c_
+        lo = lo if math.isfinite(lo) else 0.0
         return (
             result,
             report,
@@ -574,6 +766,18 @@ class Toolbox:
         after = self.ws.preview_of(result.pixels)
         result_prev = self.ws.write_image(after, f"posa_{n}.jpg")
         ba = self.ws.write_image(overlays.side_by_side(before, after), f"prima_dopo_{n}.jpg")
+        # il revisore vede da vicino, a piena risoluzione, i punti dove nascono i difetti
+        edges = self.ws.write_image(
+            overlays.light_details(
+                self.ws.source.pixels,
+                result.pixels,
+                result.alpha,
+                n=6,
+                crop=(240, 170),
+                scale=self.state.preview_scale,
+            ),
+            f"posa_{n}_bordi.jpg",
+        )
         failed = [c.name for c in report.checks if c.blocking and not c.passed]
         if not integrity:
             att = self._record(
@@ -589,7 +793,7 @@ class Toolbox:
             self.ws.log(f"❌ controllo-integrità: FALLITO ({', '.join(failed)})")
             return self._reply("posa", att)
         self.ws.log(
-            "✅ controllo-integrità: pixel fuori dal pavimento identici all'originale, "
+            "✅ controllo-integrità: pixel fuori dalla superficie identici all'originale, "
             "risoluzione e profilo colore invariati"
         )
         variants = self.catalog.load_variants(spec)
@@ -604,15 +808,18 @@ class Toolbox:
             ),
             f"campionario_{spec.id}.jpg",
         )
+        sizes = ", ".join(
+            f"{pl.length_mm / 1000:.2f} x {pl.width_mm / 1000:.2f} m" for pl in self.state.planes
+        )
+        where = "Parete (larghezza x altezza)" if self.state.is_wall else "Stanza"
         verdict = await self._check(
             CheckRequest(
                 "revisore-finale",
-                prompts.CHECK_RENDER,
-                [ba, sample_sheet],
+                self.prompts.check_render,
+                [ba, edges, sample_sheet],
                 f"Materiale: {spec.name}, {spec.tile_w_mm / 10:g}x{spec.tile_h_mm / 10:g} cm, fuga "
-                f"{spec.joint_mm:g} mm. Stanza {geom.length_mm / 1000:.2f} x "
-                f"{geom.width_mm / 1000:.2f} m. Controlli di integrità: tutti superati "
-                f"({len(report.checks)}).",
+                f"{spec.joint_mm:g} mm. {where}: {sizes}. Controlli di integrità: tutti "
+                f"superati ({len(report.checks)}).",
             )
         )
         att = self._record("posa", result.final_sha256, ba, verdict)
@@ -631,7 +838,7 @@ class Toolbox:
                 result_preview=result_prev,
             )
             self.ws.persist()
-        return self._reply("posa", att, {"prima_dopo": ba})
+        return self._reply("posa", att, {"prima_dopo": ba, "bordi": edges})
 
     # ------------------------------------------------------------------- consegna
     async def consegna(self) -> Result:
@@ -684,8 +891,12 @@ class Toolbox:
             "richiesta": s.request.model_dump(mode="json"),
             "materiale": spec.model_dump(mode="json") if spec else None,
             "scelta_materiale": s.material.model_dump(mode="json") if s.material else None,
+            "superficie": s.request.surface,
             "stanza_m": [s.geometry.length_mm / 1000, s.geometry.width_mm / 1000]
-            if s.geometry
+            if s.geometry and not s.is_wall
+            else None,
+            "pareti_m": [[pl.length_mm / 1000, pl.width_mm / 1000] for pl in s.planes]
+            if s.is_wall
             else None,
             "misure_stimate": s.room_estimated,
             "posa": s.render.layout.model_dump(mode="json") if s.render else None,
@@ -731,20 +942,30 @@ class Toolbox:
         async def t_stato(args: dict[str, Any]) -> dict[str, Any]:
             return wrap(await self.stato_pratica())
 
+        box = {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}
+        surface_word = (
+            "della zona di parete da rivestire" if self.state.is_wall else "del pavimento"
+        )
+
         @tool(
             "proponi_maschera",
-            "Propone la maschera del pavimento e la fa giudicare a un controllore indipendente. "
-            "base='automatica' (consigliato): parte dal modello di segmentazione; 'area' limita "
-            "il risultato a una zona, 'pavimento' aggiunge zone, 'escludi' toglie zone (tappeti, "
-            "oggetti). base='poligoni': solo i poligoni 'pavimento'/'escludi'. Coordinate in "
-            "pixel di preview_griglia.jpg.",
+            f"Propone la maschera {surface_word} e la fa giudicare a un controllore "
+            "indipendente. base='automatica' (consigliato): parte dal modello di segmentazione. "
+            "Correzioni: 'escludi_oggetti' = riquadri [x0,y0,x1,y1] larghi attorno agli oggetti "
+            "da togliere (il contorno preciso lo trova il codice: è lo strumento da preferire); "
+            "'area' = poligoni che racchiudono la zona da tenere; 'aggiungi' = poligoni di "
+            "superficie da aggiungere; 'escludi' = poligoni da togliere (zone grandi). "
+            "base='poligoni': solo le correzioni, senza modello. Coordinate in pixel di "
+            "preview_griglia.jpg.",
             {
                 "type": "object",
                 "properties": {
                     "base": {"type": "string", "enum": ["automatica", "poligoni"]},
                     "area": {"type": "array", "items": poly},
+                    "aggiungi": {"type": "array", "items": poly},
                     "pavimento": {"type": "array", "items": poly},
                     "escludi": {"type": "array", "items": poly},
+                    "escludi_oggetti": {"type": "array", "items": box},
                     "rifinisci": {"type": "boolean"},
                 },
             },
@@ -758,6 +979,8 @@ class Toolbox:
                     bool(args.get("rifinisci", True)),
                     str(args.get("base", "automatica")),
                     args.get("area"),
+                    args.get("escludi_oggetti"),
+                    args.get("aggiungi"),
                 )
             )
 
@@ -782,6 +1005,42 @@ class Toolbox:
                     args.get("angoli"), args.get("lunghezza_m"), args.get("larghezza_m")
                 )
             )
+
+        @tool(
+            "proponi_geometria_parete",
+            "Propone la prospettiva delle pareti da rivestire: per ogni parete (1-3) i 4 angoli "
+            "di un rettangolo sul muro, in ordine alto-sinistra, alto-destra, basso-destra, "
+            "basso-sinistra (pixel di preview_griglia.jpg, anche fuori immagine), con larghezza "
+            "e altezza reali in metri; un controllore giudica la griglia proiettata sul muro.",
+            {
+                "type": "object",
+                "properties": {
+                    "pareti": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_PLANES,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "angoli": {
+                                    "type": "array",
+                                    "items": point,
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                },
+                                "larghezza_m": {"type": "number"},
+                                "altezza_m": {"type": "number"},
+                            },
+                            "required": ["angoli"],
+                        },
+                    }
+                },
+                "required": ["pareti"],
+            },
+        )
+        async def t_geometria_parete(args: dict[str, Any]) -> dict[str, Any]:
+            self._trace("proponi_geometria_parete", args)
+            return wrap(await self.proponi_geometria_parete(args.get("pareti")))
 
         @tool(
             "catalogo",
@@ -811,7 +1070,7 @@ class Toolbox:
 
         @tool(
             "proponi_luce",
-            "Regola luci e ombre del nuovo pavimento e le fa giudicare dal controllo-luce. "
+            "Regola luci e ombre della nuova superficie e le fa giudicare dal controllo-luce. "
             "Senza argomenti usa i valori di partenza della finitura del materiale. "
             "ombre 0-1.5 (ombre della foto: tavoli, sedie, mobili), riflessi 0-1 (riflessi di "
             "luci e mobili), contatto 0-1.5 (ombra a ridosso di mobili e muri), luce_calda 0-1 "
@@ -864,7 +1123,7 @@ class Toolbox:
                 t_guarda,
                 t_stato,
                 t_maschera,
-                t_geometria,
+                t_geometria_parete if self.state.is_wall else t_geometria,
                 t_catalogo,
                 t_materiale,
                 t_luce,

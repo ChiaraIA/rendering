@@ -17,9 +17,15 @@ Questa cartella è l'app Shopify da collegare al servizio `posa server`.
 4. Con la Shopify CLI: `shopify app deploy` (pubblica configurazione ed estensione).
 
 ## Per ogni negozio cliente
-1. Registra il negozio sul servizio (token di amministrazione):
-   `curl -X POST https://SERVER/admin/negozi -H "Authorization: Bearer $POSA_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"dominio":"negozio.myshopify.com","sito":"https://www.negozio.it","prove_al_giorno":100}'`
+1. Registra il negozio sul servizio (token di amministrazione), con il suo piano:
+   `curl -X POST https://SERVER/admin/negozi -H "Authorization: Bearer $POSA_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"dominio":"negozio.myshopify.com","sito":"https://www.negozio.it","piano":"professionale","prove_al_giorno":100}'`
 2. Prima sincronizzazione del catalogo:
    `curl -X POST https://SERVER/admin/negozi/negozio.myshopify.com/sincronizza -H "Authorization: Bearer $POSA_ADMIN_TOKEN"`
 3. Il negozio installa l'app e, nell'editor del tema, aggiunge il blocco
    "Prova nella tua stanza" al modello prodotto.
+4. Nel blocco si sceglie **dove si posa l'articolo**: pavimento, parete (rivestimento) o
+   "lo sceglie il cliente". Gli articoli con il tag `Utilizzo_Pavimento` o
+   `Utilizzo_Rivestimento` si possono provare solo su quella superficie.
+
+Il negozio è un cliente come gli altri: piano, quote mensili, uso e pagamenti si gestiscono
+come descritto in `docs/SAAS.md` (l'id del cliente è il dominio `.myshopify.com`).

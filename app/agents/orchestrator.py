@@ -2,7 +2,8 @@
 
 Struttura:
 - orchestratore (questa sessione): pianifica, delega, gestisce i retry e l'escalation;
-- agenti esecutori (sotto-agenti): `pavimento`, `geometra`, `materiali`;
+- agenti esecutori (sotto-agenti): `pavimento` oppure `parete` (maschera), `geometra`,
+  `materiali`, `luci`; prompt e strumenti dipendono dalla superficie della pratica;
 - controllori indipendenti: avviati dal codice dentro gli strumenti (vedi checkers.py);
 - cancelli: nel codice (state.py), nessun agente può scavalcarli.
 """
@@ -19,15 +20,18 @@ from app import config
 from app.agents import prompts
 from app.agents.checkers import CheckerRunner, ClaudeChecker
 from app.agents.security import INJECTION_GUARD, locked_options, redact
-from app.agents.state import ClientRequest
+from app.agents.state import ClientRequest, Zone
 from app.agents.tools import Toolbox
 from app.catalog.loader import Catalog
+from app.core.models import Surface
 from app.storage.workspace import Workspace
 
 SUBAGENT_LABELS = {
     "pavimento": "🟦 pavimento",
+    "parete": "🧱 parete",
     "geometra": "📐 geometra",
-    "materiali": "🧱 materiali",
+    "materiali": "🎨 materiali",
+    "luci": "💡 luci",
 }
 
 
@@ -39,23 +43,39 @@ class JobOutcome:
     cost_usd: float
 
 
-def _subagents(model: str) -> dict[str, Any]:
+def geometry_tool(surface: str) -> str:
+    return "proponi_geometria_parete" if surface == "rivestimento" else "proponi_geometria"
+
+
+def _subagents(model: str, surface: str = "pavimento") -> dict[str, Any]:
     from claude_agent_sdk import AgentDefinition
+
+    pr = prompts.for_surface(surface)
+    wall = surface == "rivestimento"
 
     def t(*names: str) -> list[str]:
         return [f"mcp__posa__{n}" for n in ("guarda", *names)]
 
     return {
-        "pavimento": AgentDefinition(
-            description="Delimita il pavimento visibile (maschera), escludendo mobili e muri.",
-            prompt=prompts.MASK_AGENT + INJECTION_GUARD,
+        pr.mask_agent_name: AgentDefinition(
+            description=(
+                "Delimita la zona di parete da rivestire (maschera), escludendo piano di "
+                "lavoro, pensili, finestre, prese e oggetti."
+                if wall
+                else "Delimita il pavimento visibile (maschera), escludendo mobili, oggetti e muri."
+            ),
+            prompt=pr.mask_agent + INJECTION_GUARD,
             tools=t("proponi_maschera", "stato_pratica"),
             model=model,
         ),
         "geometra": AgentDefinition(
-            description="Trova la prospettiva del pavimento: 4 angoli della stanza e misure.",
-            prompt=prompts.GEOMETRY_AGENT + INJECTION_GUARD,
-            tools=t("proponi_geometria", "stato_pratica"),
+            description=(
+                "Trova la prospettiva delle pareti da rivestire: 4 angoli e misure per parete."
+                if wall
+                else "Trova la prospettiva del pavimento: 4 angoli della stanza e misure."
+            ),
+            prompt=pr.geometry_agent + INJECTION_GUARD,
+            tools=t(geometry_tool(surface), "stato_pratica"),
             model=model,
         ),
         "materiali": AgentDefinition(
@@ -65,8 +85,8 @@ def _subagents(model: str) -> dict[str, Any]:
             model=model,
         ),
         "luci": AgentDefinition(
-            description="Regola luci, ombre e riflessi del nuovo pavimento perché sia naturale.",
-            prompt=prompts.LIGHT_AGENT + INJECTION_GUARD,
+            description="Regola luci, ombre e riflessi della nuova superficie perché sia naturale.",
+            prompt=pr.light_agent + INJECTION_GUARD,
             tools=t("proponi_luce", "stato_pratica"),
             model=model,
         ),
@@ -75,8 +95,14 @@ def _subagents(model: str) -> dict[str, Any]:
 
 def _job_prompt(ws: Workspace) -> str:
     req = ws.state.request
+    wall = req.surface == "rivestimento"
     lines = [
-        f"Nuova pratica {ws.state.job_id}.",
+        f"Nuova pratica {ws.state.job_id}: "
+        + (
+            f"rivestimento a PARETE (zona richiesta: {req.zone})."
+            if wall
+            else "posa del PAVIMENTO."
+        ),
         f"Foto del cliente: {ws.state.image.width}x{ws.state.image.height} px "
         f"(per gli agenti: preview.jpg e preview_griglia.jpg, {ws.state.preview_size[0]}x"
         f"{ws.state.preview_size[1]} px).",
@@ -86,12 +112,13 @@ def _job_prompt(ws: Workspace) -> str:
     if req.sample_file:
         lines.append("Il cliente ha mandato la foto di un campione: campione.jpg.")
     if req.room_mm:
+        what = "della zona di parete (larghezza x altezza)" if wall else "della stanza"
         lines.append(
-            f"Misure della stanza date dal cliente: {req.room_mm[0] / 1000:.2f} x "
+            f"Misure {what} date dal cliente: {req.room_mm[0] / 1000:.2f} x "
             f"{req.room_mm[1] / 1000:.2f} m."
         )
     else:
-        lines.append("Il cliente non ha dato le misure della stanza: andranno stimate.")
+        lines.append("Il cliente non ha dato le misure: andranno stimate.")
     lines.append("Inizia chiamando stato_pratica, poi segui la procedura.")
     return "\n".join(lines)
 
@@ -106,11 +133,12 @@ async def run_job(
 
     model = model or config.AGENT_MODEL
     toolbox = Toolbox(ws, catalog, checker or ClaudeChecker(model))
+    surface = ws.state.request.surface
     tools = [
         "guarda",
         "stato_pratica",
         "proponi_maschera",
-        "proponi_geometria",
+        geometry_tool(surface),
         "catalogo",
         "scegli_materiale",
         "proponi_luce",
@@ -119,11 +147,11 @@ async def run_job(
         "richiedi_operatore",
     ]
     options = locked_options(
-        system_prompt=prompts.ORCHESTRATOR + INJECTION_GUARD,
+        system_prompt=prompts.for_surface(surface).orchestrator + INJECTION_GUARD,
         model=model,
         cwd=str(ws.root),
         mcp_servers={"posa": toolbox.mcp_server()},
-        agents=_subagents(model),
+        agents=_subagents(model, surface),
         tools=["Task", "Agent"],  # solo deleghe ai sotto-agenti: niente file, shell o rete
         allowed_tools=["Task", "Agent", *[f"mcp__posa__{n}" for n in tools]],
         max_turns=config.ORCHESTRATOR_MAX_TURNS,
@@ -184,14 +212,21 @@ def start(
     sample: Path | None = None,
     room_m: tuple[float, float] | None = None,
     listener: Callable[[str], None] | None = None,
+    surface: Surface = "pavimento",
+    zone: Zone = "automatica",
 ) -> Workspace:
-    """Crea la pratica (ingest in sola lettura dell'originale)."""
+    """Crea la pratica (ingest in sola lettura dell'originale).
+
+    `surface`: "pavimento" o "rivestimento" (parete). Per un rivestimento `room_m` sono
+    larghezza e altezza della zona di parete, e `zone` dice quale zona rivestire."""
     if not material_id and not sample:
         raise ValueError("serve un codice a catalogo o la foto di un campione")
     req = ClientRequest(
         material_id=material_id,
         sample_file=str(sample) if sample else None,
         room_mm=(room_m[0] * 1000, room_m[1] * 1000) if room_m else None,
+        surface=surface,
+        zone=zone,
     )
     ws = Workspace.create(photo, out_dir, req)
     if listener:

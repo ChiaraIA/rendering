@@ -1,26 +1,65 @@
-"""Archivio del servizio (SQLite): negozi, pratiche, limiti di frequenza.
+"""Archivio del servizio (SQLite): clienti, chiavi API, piani, uso mensile, pratiche.
+
+Un "cliente" è chi paga il canone: un sito che integra posa (canale `sito`, con chiavi API)
+oppure un negozio Shopify (canale `shopify`, identificato dal dominio .myshopify.com).
 
 Solo query parametrizzate. Nessun dato personale del cliente finale: niente nomi, email o
-indirizzi; l'IP è conservato solo come hash con sale, per i limiti anti-abuso.
+indirizzi; l'IP è conservato solo come hash con sale, per i limiti anti-abuso. Le chiavi
+API sono conservate solo come hash SHA-256: la chiave in chiaro si vede una volta sola.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS shops (
-    domain TEXT PRIMARY KEY,
-    store_url TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
+CREATE TABLE IF NOT EXISTS tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    site TEXT NOT NULL,
+    origins TEXT NOT NULL DEFAULT '[]',
+    plan TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'attivo',
     daily_quota INTEGER NOT NULL,
+    monthly_quota INTEGER,
+    billing_ref TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_keys (
+    hash TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    revoked_at REAL
+);
+CREATE INDEX IF NOT EXISTS api_keys_tenant ON api_keys(tenant);
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    monthly_jobs INTEGER NOT NULL,
+    surfaces TEXT NOT NULL,
+    overage INTEGER NOT NULL DEFAULT 0,
+    monthly_fee_eur REAL,
+    extra_job_eur REAL
+);
+CREATE TABLE IF NOT EXISTS usage (
+    tenant TEXT NOT NULL,
+    month TEXT NOT NULL,
+    created INTEGER NOT NULL DEFAULT 0,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant, month)
 );
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
@@ -32,7 +71,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at REAL NOT NULL,
     ip_hash TEXT NOT NULL,
     room TEXT,
-    cost_usd REAL NOT NULL DEFAULT 0
+    cost_usd REAL NOT NULL DEFAULT 0,
+    surface TEXT NOT NULL DEFAULT 'pavimento',
+    zone TEXT NOT NULL DEFAULT 'automatica'
 );
 CREATE INDEX IF NOT EXISTS jobs_shop_time ON jobs(shop, created_at);
 CREATE INDEX IF NOT EXISTS jobs_ip_time ON jobs(ip_hash, created_at);
@@ -41,26 +82,93 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 STATUSES = ("in_coda", "in_lavorazione", "pronto", "non_riuscito")
+TENANT_STATUSES = ("attivo", "sospeso", "disdetto")
+CHANNELS = ("sito", "shopify")
+SURFACES = ("pavimento", "rivestimento")
+KEY_KINDS = {"pubblica": "pk_live_", "segreta": "sk_live_"}
+
+# Piani di partenza (modificabili da /admin/piani). I prezzi NON sono decisi qui: il canone
+# si imposta dall'amministrazione; il servizio applica solo quote e superfici.
+DEFAULT_PLANS = (
+    ("prova", "Prova", 30, ("pavimento", "rivestimento"), False),
+    ("base", "Base", 150, ("pavimento",), False),
+    ("professionale", "Professionale", 600, ("pavimento", "rivestimento"), True),
+    ("azienda", "Azienda", 3000, ("pavimento", "rivestimento"), True),
+)
+DEFAULT_PLAN = "prova"
+# le pratiche fallite costano comunque (agenti): oltre questo multiplo della quota mensile
+# il cliente viene fermato anche se le consegnate sono poche (foto inadatte, abusi)
+ATTEMPTS_FACTOR = 2
 
 
 @dataclass(frozen=True)
-class Shop:
-    domain: str
-    store_url: str
-    active: bool
+class Plan:
+    id: str
+    name: str
+    monthly_jobs: int
+    surfaces: tuple[str, ...]
+    overage: bool  # oltre la quota: True = si continua (a consumo), False = ci si ferma
+    monthly_fee_eur: float | None = None
+    extra_job_eur: float | None = None
+
+
+@dataclass(frozen=True)
+class Tenant:
+    id: str
+    name: str
+    channel: str
+    site: str
+    origins: tuple[str, ...]
+    plan: str
+    status: str
     daily_quota: int
+    monthly_quota: int | None  # None = quella del piano
+    billing_ref: str
+
+    @property
+    def active(self) -> bool:
+        return self.status == "attivo"
+
+
+@dataclass(frozen=True)
+class Usage:
+    month: str
+    created: int
+    delivered: int
+    failed: int
+    cost_usd: float
 
 
 @dataclass(frozen=True)
 class Job:
     id: str
-    shop: str
+    shop: str  # id del cliente (per Shopify: il dominio del negozio)
     article: str
     status: str
     step: str
     created_at: float
     updated_at: float
     cost_usd: float
+    surface: str = "pavimento"
+    zone: str = "automatica"
+
+
+def month_of(ts: float | None = None) -> str:
+    return time.strftime("%Y-%m", time.gmtime(ts if ts is not None else time.time()))
+
+
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+_TENANT_COLS = (
+    "id, name, channel, site, origins, plan, status, daily_quota, monthly_quota, billing_ref"
+)
+_JOB_COLS = "id, shop, article, status, step, created_at, updated_at, cost_usd, surface, zone"
+
+
+def _tenant(r: tuple[Any, ...]) -> Tenant:
+    return Tenant(r[0], r[1], r[2], r[3], tuple(json.loads(r[4])), r[5], r[6], r[7], r[8], r[9])
 
 
 class Store:
@@ -71,6 +179,7 @@ class Store:
         self._lock = threading.Lock()
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             row = self._db.execute("SELECT value FROM meta WHERE key='salt'").fetchone()
             if row is None:
                 self._db.execute(
@@ -78,43 +187,272 @@ class Store:
                 )
                 row = self._db.execute("SELECT value FROM meta WHERE key='salt'").fetchone()
             self._salt = row[0]
+            for pid, name, jobs, surfaces, overage in DEFAULT_PLANS:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO plans(id, name, monthly_jobs, surfaces, overage) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (pid, name, jobs, json.dumps(surfaces), int(overage)),
+                )
 
-    # ------------------------------------------------------------------ negozi
-    def upsert_shop(self, domain: str, store_url: str, daily_quota: int) -> None:
-        with self._lock:
+    def _migrate(self) -> None:
+        """Archivi creati prima dei clienti/piani: colonne nuove e negozi -> clienti."""
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(jobs)")}
+        if "surface" not in cols:
             self._db.execute(
-                "INSERT INTO shops(domain, store_url, active, daily_quota, created_at) "
-                "VALUES(?, ?, 1, ?, ?) ON CONFLICT(domain) DO UPDATE SET "
-                "store_url=excluded.store_url, daily_quota=excluded.daily_quota, active=1",
-                (domain, store_url, daily_quota, time.time()),
+                "ALTER TABLE jobs ADD COLUMN surface TEXT NOT NULL DEFAULT 'pavimento'"
             )
+        if "zone" not in cols:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN zone TEXT NOT NULL DEFAULT 'automatica'")
+        old = self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='shops'"
+        ).fetchone()
+        if old:
+            for domain, url, active, quota, created in self._db.execute(
+                "SELECT domain, store_url, active, daily_quota, created_at FROM shops"
+            ).fetchall():
+                self._db.execute(
+                    "INSERT OR IGNORE INTO tenants(id, name, channel, site, plan, status, "
+                    "daily_quota, created_at) VALUES(?, ?, 'shopify', ?, ?, ?, ?, ?)",
+                    (
+                        domain,
+                        domain,
+                        url,
+                        "professionale",
+                        "attivo" if active else "sospeso",
+                        quota,
+                        created,
+                    ),
+                )
+            self._db.execute("DROP TABLE shops")
 
-    def shop(self, domain: str) -> Shop | None:
-        with self._lock:
-            r = self._db.execute(
-                "SELECT domain, store_url, active, daily_quota FROM shops WHERE domain=?",
-                (domain,),
-            ).fetchone()
-        return Shop(r[0], r[1], bool(r[2]), r[3]) if r else None
-
-    def shops(self) -> list[Shop]:
+    # ------------------------------------------------------------------- piani
+    def plans(self) -> list[Plan]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT domain, store_url, active, daily_quota FROM shops ORDER BY domain"
+                "SELECT id, name, monthly_jobs, surfaces, overage, monthly_fee_eur, extra_job_eur "
+                "FROM plans ORDER BY monthly_jobs"
             ).fetchall()
-        return [Shop(r[0], r[1], bool(r[2]), r[3]) for r in rows]
+        return [
+            Plan(r[0], r[1], r[2], tuple(json.loads(r[3])), bool(r[4]), r[5], r[6]) for r in rows
+        ]
 
-    def set_active(self, domain: str, active: bool) -> None:
-        with self._lock:
-            self._db.execute("UPDATE shops SET active=? WHERE domain=?", (int(active), domain))
+    def plan(self, plan_id: str) -> Plan | None:
+        return next((p for p in self.plans() if p.id == plan_id), None)
 
-    def delete_shop(self, domain: str) -> list[str]:
-        """Cancella il negozio e ritorna gli id delle sue pratiche (per cancellarne i file)."""
+    def upsert_plan(self, plan: Plan) -> None:
         with self._lock:
-            ids = [r[0] for r in self._db.execute("SELECT id FROM jobs WHERE shop=?", (domain,))]
-            self._db.execute("DELETE FROM jobs WHERE shop=?", (domain,))
-            self._db.execute("DELETE FROM shops WHERE domain=?", (domain,))
+            self._db.execute(
+                "INSERT INTO plans(id, name, monthly_jobs, surfaces, overage, monthly_fee_eur, "
+                "extra_job_eur) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "name=excluded.name, monthly_jobs=excluded.monthly_jobs, "
+                "surfaces=excluded.surfaces, overage=excluded.overage, "
+                "monthly_fee_eur=excluded.monthly_fee_eur, extra_job_eur=excluded.extra_job_eur",
+                (
+                    plan.id,
+                    plan.name,
+                    plan.monthly_jobs,
+                    json.dumps(plan.surfaces),
+                    int(plan.overage),
+                    plan.monthly_fee_eur,
+                    plan.extra_job_eur,
+                ),
+            )
+
+    # ----------------------------------------------------------------- clienti
+    def upsert_tenant(
+        self,
+        tenant_id: str,
+        *,
+        name: str,
+        channel: str,
+        site: str,
+        daily_quota: int,
+        origins: tuple[str, ...] = (),
+        plan: str | None = None,
+        monthly_quota: int | None = None,
+    ) -> None:
+        """Crea il cliente o ne aggiorna i dati. Un cliente esistente resta nel suo stato
+        (un cliente sospeso per mancato pagamento non torna attivo ri-registrandolo)."""
+        if channel not in CHANNELS:
+            raise ValueError(f"canale sconosciuto: {channel}")
+        with self._lock:
+            exists = self._db.execute(
+                "SELECT plan FROM tenants WHERE id=?", (tenant_id,)
+            ).fetchone()
+            if exists is None:
+                self._db.execute(
+                    "INSERT INTO tenants(id, name, channel, site, origins, plan, status, "
+                    "daily_quota, monthly_quota, created_at) VALUES(?, ?, ?, ?, ?, ?, 'attivo', "
+                    "?, ?, ?)",
+                    (
+                        tenant_id,
+                        name,
+                        channel,
+                        site,
+                        json.dumps(origins),
+                        plan or DEFAULT_PLAN,
+                        daily_quota,
+                        monthly_quota,
+                        time.time(),
+                    ),
+                )
+            else:
+                self._db.execute(
+                    "UPDATE tenants SET name=?, site=?, origins=?, plan=?, daily_quota=?, "
+                    "monthly_quota=? WHERE id=?",
+                    (
+                        name,
+                        site,
+                        json.dumps(origins),
+                        plan or exists[0],
+                        daily_quota,
+                        monthly_quota,
+                        tenant_id,
+                    ),
+                )
+
+    def tenant(self, tenant_id: str) -> Tenant | None:
+        with self._lock:
+            r = self._db.execute(
+                f"SELECT {_TENANT_COLS} FROM tenants WHERE id=?",  # nosec B608
+                (tenant_id,),
+            ).fetchone()
+        return _tenant(r) if r else None
+
+    def tenants(self) -> list[Tenant]:
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_TENANT_COLS} FROM tenants ORDER BY id"  # nosec B608
+            ).fetchall()
+        return [_tenant(r) for r in rows]
+
+    def tenant_by_billing_ref(self, ref: str) -> Tenant | None:
+        if not ref:
+            return None
+        with self._lock:
+            r = self._db.execute(
+                f"SELECT {_TENANT_COLS} FROM tenants WHERE billing_ref=?",  # nosec B608
+                (ref,),
+            ).fetchone()
+        return _tenant(r) if r else None
+
+    def set_status(self, tenant_id: str, status: str) -> None:
+        if status not in TENANT_STATUSES:
+            raise ValueError(f"stato sconosciuto: {status}")
+        with self._lock:
+            self._db.execute("UPDATE tenants SET status=? WHERE id=?", (status, tenant_id))
+
+    def set_billing(
+        self, tenant_id: str, *, ref: str | None = None, plan: str | None = None
+    ) -> None:
+        with self._lock:
+            if ref is not None:
+                self._db.execute("UPDATE tenants SET billing_ref=? WHERE id=?", (ref, tenant_id))
+            if plan is not None:
+                self._db.execute("UPDATE tenants SET plan=? WHERE id=?", (plan, tenant_id))
+
+    def delete_tenant(self, tenant_id: str) -> list[str]:
+        """Cancella il cliente e ritorna gli id delle sue pratiche (per cancellarne i file)."""
+        with self._lock:
+            ids = [r[0] for r in self._db.execute("SELECT id FROM jobs WHERE shop=?", (tenant_id,))]
+            self._db.execute("DELETE FROM jobs WHERE shop=?", (tenant_id,))
+            self._db.execute("DELETE FROM api_keys WHERE tenant=?", (tenant_id,))
+            self._db.execute("DELETE FROM usage WHERE tenant=?", (tenant_id,))
+            self._db.execute("DELETE FROM tenants WHERE id=?", (tenant_id,))
         return ids
+
+    # ------------------------------------------------------------- chiavi API
+    def create_key(self, tenant_id: str, kind: str) -> str:
+        """Nuova chiave del cliente: ritorna la chiave in chiaro, che non è conservata."""
+        key = KEY_KINDS[kind] + secrets.token_urlsafe(32)
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO api_keys(hash, tenant, kind, prefix, created_at) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (hash_key(key), tenant_id, kind, key[:14], time.time()),
+            )
+        return key
+
+    def key_owner(self, key: str, kind: str) -> Tenant | None:
+        """Cliente a cui appartiene una chiave valida e non revocata del tipo richiesto."""
+        if not key.startswith(KEY_KINDS[kind]) or len(key) > 128:
+            return None
+        with self._lock:
+            r = self._db.execute(
+                "SELECT tenant FROM api_keys WHERE hash=? AND kind=? AND revoked_at IS NULL",
+                (hash_key(key), kind),
+            ).fetchone()
+        return self.tenant(r[0]) if r else None
+
+    def keys(self, tenant_id: str) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT kind, prefix, created_at, revoked_at FROM api_keys WHERE tenant=? "
+                "ORDER BY created_at",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {"tipo": r[0], "inizio": r[1], "creata": r[2], "revocata": r[3] is not None}
+            for r in rows
+        ]
+
+    def revoke_key(self, tenant_id: str, prefix: str) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE api_keys SET revoked_at=? WHERE tenant=? AND prefix=? "
+                "AND revoked_at IS NULL",
+                (time.time(), tenant_id, prefix),
+            )
+        return cur.rowcount
+
+    # --------------------------------------------------------------------- uso
+    def usage(self, tenant_id: str, month: str | None = None) -> Usage:
+        m = month or month_of()
+        with self._lock:
+            r = self._db.execute(
+                "SELECT created, delivered, failed, cost_usd FROM usage WHERE tenant=? AND month=?",
+                (tenant_id, m),
+            ).fetchone()
+        return Usage(m, *r) if r else Usage(m, 0, 0, 0, 0.0)
+
+    def usage_history(self, tenant_id: str, limit: int = 12) -> list[Usage]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT month, created, delivered, failed, cost_usd FROM usage WHERE tenant=? "
+                "ORDER BY month DESC LIMIT ?",
+                (tenant_id, limit),
+            ).fetchall()
+        return [Usage(*r) for r in rows]
+
+    def _bump(self, tenant_id: str, month: str, column: str, cost: float = 0.0) -> None:
+        # `column` arriva solo da costanti di questo modulo
+        self._db.execute(
+            "INSERT INTO usage(tenant, month) VALUES(?, ?) ON CONFLICT(tenant, month) DO NOTHING",
+            (tenant_id, month),
+        )
+        sql = (
+            f"UPDATE usage SET {column}={column}+1, cost_usd=cost_usd+? WHERE tenant=? AND month=?"  # nosec B608
+        )
+        self._db.execute(sql, (cost, tenant_id, month))
+
+    def monthly_allowance(self, tenant: Tenant) -> tuple[int, bool]:
+        """(prove comprese nel mese, si può andare oltre a consumo)."""
+        plan = self.plan(tenant.plan)
+        base = tenant.monthly_quota if tenant.monthly_quota is not None else None
+        if plan is None:
+            return (base or 0, False)
+        return (base if base is not None else plan.monthly_jobs, plan.overage)
+
+    def quota_problem(self, tenant: Tenant) -> str | None:
+        """None se il cliente può avviare un'altra prova questo mese, altrimenti il motivo."""
+        allowed, overage = self.monthly_allowance(tenant)
+        used = self.usage(tenant.id)
+        in_flight = used.created - used.delivered - used.failed
+        if used.created >= ATTEMPTS_FACTOR * max(allowed, 1) and not overage:
+            return "troppe prove non riuscite questo mese: contatta l'assistenza"
+        if not overage and used.delivered + in_flight >= allowed:
+            return "prove del mese esaurite per questo piano"
+        return None
 
     # ---------------------------------------------------------------- pratiche
     def ip_hash(self, ip: str) -> str:
@@ -146,22 +484,30 @@ class Store:
             q = "SELECT COUNT(*) FROM jobs WHERE status IN ('in_coda', 'in_lavorazione')"
             return int(self._db.execute(q).fetchone()[0])
 
-    def create_job(self, shop: str, article: str, ip_hash: str, room: str | None) -> str:
+    def create_job(
+        self,
+        shop: str,
+        article: str,
+        ip_hash: str,
+        room: str | None,
+        surface: str = "pavimento",
+        zone: str = "automatica",
+    ) -> str:
         job_id = secrets.token_urlsafe(24)  # 192 bit: non si indovina
         now = time.time()
         with self._lock:
             self._db.execute(
-                "INSERT INTO jobs(id, shop, article, status, created_at, updated_at, ip_hash, room)"
-                " VALUES(?, ?, ?, 'in_coda', ?, ?, ?, ?)",
-                (job_id, shop, article, now, now, ip_hash, room),
+                "INSERT INTO jobs(id, shop, article, status, created_at, updated_at, ip_hash, "
+                "room, surface, zone) VALUES(?, ?, ?, 'in_coda', ?, ?, ?, ?, ?, ?)",
+                (job_id, shop, article, now, now, ip_hash, room, surface, zone),
             )
+            self._bump(shop, month_of(now), "created")
         return job_id
 
     def job(self, job_id: str) -> Job | None:
         with self._lock:
             r = self._db.execute(
-                "SELECT id, shop, article, status, step, created_at, updated_at, cost_usd "
-                "FROM jobs WHERE id=?",
+                f"SELECT {_JOB_COLS} FROM jobs WHERE id=?",  # nosec B608
                 (job_id,),
             ).fetchone()
         return Job(*r) if r else None
@@ -189,15 +535,28 @@ class Store:
             sets.append("cost_usd=?")
             args.append(cost_usd)
         with self._lock:
+            before = self._db.execute(
+                "SELECT shop, status, created_at FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
             # solo nomi di colonna fissi nel testo SQL: i valori passano come parametri
             sql = f"UPDATE jobs SET {', '.join(sets)} WHERE id=?"  # nosec B608
             self._db.execute(sql, (*args, job_id))
+            # l'uso del mese si chiude una volta sola, quando la pratica finisce
+            done = {"pronto": "delivered", "non_riuscito": "failed"}
+            if before and status in done and before[1] not in done:
+                self._bump(before[0], month_of(before[2]), done[status], cost_usd or 0.0)
 
     def queued_job_ids(self) -> list[str]:
         with self._lock:
             rows = self._db.execute(
                 "SELECT id FROM jobs WHERE status='in_coda' ORDER BY created_at"
             ).fetchall()
+        return [r[0] for r in rows]
+
+    def interrupted_job_ids(self) -> list[str]:
+        """Pratiche rimaste "in lavorazione" da un riavvio del servizio."""
+        with self._lock:
+            rows = self._db.execute("SELECT id FROM jobs WHERE status='in_lavorazione'").fetchall()
         return [r[0] for r in rows]
 
     def expired_jobs(self, before: float) -> list[str]:

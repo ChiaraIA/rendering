@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 Scope = dict[str, Any]
@@ -31,9 +32,11 @@ class BodyLimitMiddleware:
         total_timeout_s: float = 300.0,
         min_rate_bps: float = 4096.0,
         grace_s: float = 10.0,
+        limit_for: Callable[[str], int] | None = None,
     ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.limit_for = limit_for  # limite per percorso (es. più foto nel catalogo)
         self.chunk_timeout_s = chunk_timeout_s
         self.total_timeout_s = total_timeout_s
         self.min_rate_bps = min_rate_bps  # sotto questa velocità media il corpo è un attacco
@@ -44,6 +47,7 @@ class BodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         received = 0
+        max_bytes = self.limit_for(scope.get("path", "")) if self.limit_for else self.max_bytes
         started = time.monotonic()
         response_started = False
 
@@ -58,7 +62,7 @@ class BodyLimitMiddleware:
                 raise _Abort(408, "invio troppo lento") from None
             if msg["type"] == "http.request":
                 received += len(msg.get("body", b""))
-                if received > self.max_bytes:
+                if received > max_bytes:
                     raise _Abort(413, "richiesta troppo grande")
                 elapsed = time.monotonic() - started
                 if (

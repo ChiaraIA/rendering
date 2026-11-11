@@ -4,8 +4,12 @@
   catalogo), supersampling stratificato + mip-map in luce lineare;
 - "flat" (debug): colore medio in luce lineare di tutte le varianti.
 
-Coordinate di posa: origine al centro della stanza, assi ruotati di `pattern.rotation_deg`
-rispetto ai muri; la piastrella (0, 0) è centrata nella stanza (tagli simmetrici).
+Coordinate di posa: assi ruotati di `pattern.rotation_deg` rispetto ai lati del rettangolo.
+- pavimento: la piastrella (0, 0) è centrata nella stanza (tagli simmetrici);
+- parete: la prima fila poggia intera sul bordo inferiore (piano di lavoro, pavimento) e i
+  tagli stanno in alto, come fa un posatore; in orizzontale la posa è centrata.
+Più pareti (cucina ad angolo): ogni parete ha la sua omografia; le file sono alla stessa
+altezza reale, quindi proseguono oltre lo spigolo.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from app.core.models import (
     MaterialLayer,
     MaterialSpec,
     PlaneGeometry,
+    PlaneKind,
     SourceImage,
 )
 
@@ -113,11 +118,22 @@ class Laying:
     r_lat: float = 0.0  # esagoni: raggio del reticolo (piastrella + mezza fuga per lato)
 
     @classmethod
-    def of(cls, spec: MaterialSpec, length_mm: float, width_mm: float) -> Laying:
+    def of(
+        cls,
+        spec: MaterialSpec,
+        length_mm: float,
+        width_mm: float,
+        kind: PlaneKind = "pavimento",
+    ) -> Laying:
         pw, ph = spec.pitch_mm
         shift = spec.pattern.bond_offset * pw if spec.pattern.type == "running_bond" else 0.0
         th = math.radians(spec.pattern.rotation_deg)
         r_tile = spec.tile_w_mm / 2
+        cy = width_mm / 2
+        if kind == "parete" and spec.pattern.rotation_deg == 0:
+            # la fila più bassa finisce esattamente sul bordo inferiore (v = W)
+            half = SQRT3 / 2 * r_tile if spec.is_hex else spec.tile_h_mm / 2
+            cy = width_mm - half
         return cls(
             spec.tile_w_mm,
             spec.tile_h_mm,
@@ -127,7 +143,7 @@ class Laying:
             math.cos(th),
             math.sin(th),
             length_mm / 2,
-            width_mm / 2,
+            cy,
             hex=spec.is_hex,
             r_tile=r_tile,
             r_lat=r_tile + spec.joint_mm / SQRT3,
@@ -417,9 +433,11 @@ def _clip_area(poly: NDArray[np.float64], length: float, width: float) -> float:
     return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2)
 
 
-def count_tiles(spec: MaterialSpec, length_mm: float, width_mm: float) -> tuple[int, int]:
-    """(piastrelle intere, piastrelle tagliate) necessarie per la stanza."""
-    laying = Laying.of(spec, length_mm, width_mm)
+def count_tiles(
+    spec: MaterialSpec, length_mm: float, width_mm: float, kind: PlaneKind = "pavimento"
+) -> tuple[int, int]:
+    """(piastrelle intere, piastrelle tagliate) necessarie per il rettangolo L x W."""
+    laying = Laying.of(spec, length_mm, width_mm, kind)
     i0, i1, j0, j1 = laying.index_range(length_mm, width_mm)
     full = laying.tile_area
     whole = cut = 0
@@ -591,7 +609,7 @@ def tiled_layer(
         joint = to_linear(jc, trc)[0, 0].astype(np.float32)
         notes = sorted(set(notes) | set(jn))
 
-    laying = Laying.of(spec, geom.length_mm, geom.width_mm)
+    laying = Laying.of(spec, geom.length_mm, geom.width_mm, geom.kind)
     vmap = VariantMap.build(spec, laying, geom.length_mm, geom.width_mm, seed)
     hi = np.asarray(geom.H_inv, dtype=np.float64)
 
@@ -667,6 +685,42 @@ def tiled_layer(
         render_mode="tiled",
         notes=tuple(notes),
         tile_ij=tile_ij,
+    )
+
+
+def surface_layer(
+    spec: MaterialSpec,
+    variants_srgb: list[NDArray[np.uint8]],
+    source: SourceImage,
+    planes: list[PlaneGeometry],
+    labels: NDArray[np.uint8],
+    mask: NDArray[np.uint8],
+    seed: int,
+    supersampling: int = 4,
+) -> MaterialLayer:
+    """Materiale posato su una superficie fatta di uno o più piani (`labels`: piano di ogni
+    pixel). Con un piano solo è `tiled_layer`; con più pareti ognuna è resa sulla sua parte
+    di maschera e i risultati sono riuniti in un unico layer."""
+    if len(planes) == 1:
+        return tiled_layer(spec, variants_srgb, source, planes[0], mask, seed, supersampling)
+    x0, y0, x1, y1 = _bbox(mask)
+    out = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.float32)
+    notes: set[str] = set()
+    for k, plane in enumerate(planes):
+        part = np.where(labels == k, mask, 0).astype(np.uint8)
+        if not part.any():
+            continue
+        layer = tiled_layer(spec, variants_srgb, source, plane, part, seed + k, supersampling)
+        px0, py0, px1, py1 = layer.bbox
+        sel = part[py0:py1, px0:px1] > 0
+        out[py0 - y0 : py1 - y0, px0 - x0 : px1 - x0][sel] = layer.rgb_linear[sel]
+        notes.update(layer.notes)
+    return MaterialLayer(
+        rgb_linear=out,
+        bbox=(x0, y0, x1, y1),
+        material_id=spec.id,
+        render_mode="tiled",
+        notes=tuple(sorted(notes)),
     )
 
 

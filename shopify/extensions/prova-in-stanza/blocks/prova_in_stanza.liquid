@@ -5,6 +5,7 @@
 <div class="posa-prova"
      data-prodotto="{{ product.handle | escape }}"
      data-variante="{{ product.selected_or_first_available_variant.id }}"
+     data-superficie="{{ block.settings.superficie | escape }}"
      data-max-mb="15">
   <button type="button" class="posa-prova__apri button">{{ block.settings.testo_pulsante | escape }}</button>
   <dialog class="posa-prova__finestra" aria-label="{{ block.settings.testo_pulsante | escape }}">
@@ -15,7 +16,13 @@
       <label>Foto della stanza
         <input type="file" name="foto" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" required>
       </label>
-      <label>Misure della stanza in metri (facoltativo)
+      <label class="posa-prova__dove">Dove vuoi vederlo
+        <select name="superficie">
+          <option value="pavimento">Pavimento</option>
+          <option value="rivestimento">Parete (rivestimento)</option>
+        </select>
+      </label>
+      <label class="posa-prova__misure">Misure della stanza in metri (facoltativo)
         <input type="text" name="stanza" inputmode="decimal" placeholder="es. 4.2x3.6" maxlength="11" pattern="\d{1,2}([.,]\d{1,2})?x\d{1,2}([.,]\d{1,2})?">
       </label>
       <p class="posa-prova__privacy">{{ block.settings.privacy | escape }}</p>
@@ -36,8 +43,15 @@
   "enabled_on": { "templates": ["product"] },
   "settings": [
     { "type": "text", "id": "testo_pulsante", "label": "Testo del pulsante", "default": "Prova nella tua stanza" },
+    { "type": "select", "id": "superficie", "label": "Dove si posa questo articolo",
+      "options": [
+        { "value": "pavimento", "label": "Pavimento" },
+        { "value": "rivestimento", "label": "Parete (rivestimento)" },
+        { "value": "scelta", "label": "Lo sceglie il cliente" }
+      ],
+      "default": "pavimento" },
     { "type": "text", "id": "titolo", "label": "Titolo", "default": "Guarda questo rivestimento a casa tua" },
-    { "type": "textarea", "id": "spiegazione", "label": "Spiegazione", "default": "Carica una foto del pavimento della tua stanza: in pochi minuti lo vedrai con il nuovo rivestimento." },
+    { "type": "textarea", "id": "spiegazione", "label": "Spiegazione", "default": "Carica una foto della tua stanza (il pavimento, o la parete da rivestire): in pochi minuti la vedrai con il nuovo rivestimento." },
     { "type": "textarea", "id": "privacy", "label": "Nota sulla privacy", "default": "La foto serve solo a creare l'anteprima e viene cancellata automaticamente dopo 7 giorni." }
   ]
 }

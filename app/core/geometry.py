@@ -1,7 +1,10 @@
-"""Geometria della stanza: omografia piano (mm) -> immagine (px) e controlli.
+"""Geometria delle superfici: omografia piano (mm) -> immagine (px) e controlli.
 
-Convenzione: la stanza è il rettangolo [0, L] x [0, W] mm sul piano del pavimento.
-L'utente indica gli angoli in ordine: P1 -> P2 è la lunghezza L, P2 -> P3 la larghezza W.
+Convenzione: ogni superficie è un rettangolo [0, L] x [0, W] mm sul proprio piano.
+- pavimento: la stanza; angoli in ordine P1 -> P2 lunghezza L, P2 -> P3 larghezza W;
+- parete: la zona di muro; angoli alto-sx, alto-dx, basso-dx, basso-sx (L = larghezza,
+  W = altezza). Un rivestimento può avere più pareti (cucina ad angolo): ogni pixel della
+  maschera appartiene alla parete il cui quadrilatero lo contiene, o alla più vicina.
 Gli angoli possono stare fuori dall'inquadratura (coordinate negative o oltre i bordi).
 """
 
@@ -14,7 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from app.core.errors import GeometryError
-from app.core.models import FocalCheck, PlaneGeometry
+from app.core.models import BBox, FocalCheck, PlaneGeometry, PlaneKind
 
 Mat3: TypeAlias = NDArray[np.float64]
 
@@ -137,6 +140,7 @@ def room_geometry(
     width_mm: float,
     image_size: tuple[int, int],
     focal_35mm: float | None = None,
+    kind: PlaneKind = "pavimento",
 ) -> PlaneGeometry:
     if len(corners_px) != 4:
         raise GeometryError("servono esattamente 4 angoli")
@@ -154,6 +158,7 @@ def room_geometry(
     reproj = float(np.abs(project(h, rect) - corners).max())
     w, hgt = image_size
     return PlaneGeometry(
+        kind=kind,
         corners_px=[(float(x), float(y)) for x, y in corners],
         length_mm=length_mm,
         width_mm=width_mm,
@@ -233,6 +238,53 @@ def jacobian_det_image_to_plane(
 ) -> NDArray[np.float64]:
     a, b, c, d = jacobian_image_to_plane(h_inv, xs, ys)
     return np.asarray(a * d - b * c)
+
+
+def assign_planes(planes: list[PlaneGeometry], shape_hw: tuple[int, int]) -> NDArray[np.uint8]:
+    """Indice del piano di ogni pixel: quello il cui quadrilatero lo contiene, altrimenti il
+    più vicino (i quadrilateri di due pareti ad angolo si toccano lungo lo spigolo)."""
+    import cv2
+
+    h, w = shape_hw
+    if len(planes) <= 1:
+        return np.zeros((h, w), np.uint8)
+    # a risoluzione ridotta: il confine tra due pareti è una linea, basta poco
+    s = min(1.0, 1024 / max(h, w))
+    sw, sh = max(1, round(w * s)), max(1, round(h * s))
+    best = np.full((sh, sw), np.inf, np.float32)
+    label = np.zeros((sh, sw), np.uint8)
+    for k, pl in enumerate(planes):
+        quad = np.zeros((sh, sw), np.uint8)
+        pts = np.rint(np.asarray(pl.corners_px) * s).astype(np.int32)
+        cv2.fillPoly(quad, [pts], 1)
+        dist = cv2.distanceTransform(1 - quad, cv2.DIST_L2, 3)
+        closer = dist < best
+        best[closer] = dist[closer]
+        label[closer] = k
+    return np.asarray(cv2.resize(label, (w, h), interpolation=cv2.INTER_NEAREST), dtype=np.uint8)
+
+
+def check_planes_in_front(
+    planes: list[PlaneGeometry], labels: NDArray[np.uint8], mask: NDArray[np.uint8]
+) -> None:
+    """Come `check_mask_in_front`, per ogni piano sui pixel che gli appartengono."""
+    for k, pl in enumerate(planes):
+        part = mask if len(planes) == 1 else np.where(labels == k, mask, 0).astype(np.uint8)
+        check_mask_in_front(pl, part)
+
+
+def px_per_mm_map_multi(
+    planes: list[PlaneGeometry], labels: NDArray[np.uint8], bbox: BBox
+) -> NDArray[np.float32]:
+    """Densità px/mm sulla bbox, con ogni pixel misurato sul proprio piano."""
+    out = px_per_mm_map(planes[0], bbox)
+    x0, y0, x1, y1 = bbox
+    sub = labels[y0:y1, x0:x1]
+    for k in range(1, len(planes)):
+        sel = sub == k
+        if sel.any():
+            out[sel] = px_per_mm_map(planes[k], bbox)[sel]
+    return out
 
 
 def px_per_mm_map(
